@@ -1,0 +1,34 @@
+# Live services are defined once; tools only start when explicitly requested.
+name: ddos-fl-laptop
+include:
+  - compose.node-a-live.yaml
+
+x-worker: &worker
+  image: ddos-fl-laptop-node-a-ml:step1
+  profiles: [tools]
+  network_mode: none
+  init: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  read_only: true
+  tmpfs: [/tmp]
+  working_dir: /workspace
+  mem_limit: 1g
+  cpus: 0.75
+  pids_limit: 128
+  volumes:
+    - ./scripts:/workspace/scripts:ro
+    - ./config/node-a:/workspace/config/node-a:ro
+    - ./data/node-a:/workspace/data/node-a
+    - ./reports:/workspace/reports
+    - ./models/node-a:/workspace/models/node-a
+
+services:
+  pipeline:
+    <<: *worker
+    mem_limit: 4g
+    command: [python3, -B, scripts/match_suricata_reference.py, --help]
+
+  trainer:
+    <<: *worker
+    command: [python3, -B, scripts/node-a/train_node_a_pilot.py, --help]

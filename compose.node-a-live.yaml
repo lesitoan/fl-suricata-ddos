@@ -1,0 +1,98 @@
+name: ddos-fl-laptop
+
+services:
+  web:
+    image: ddos-fl-laptop-node-a-sensor:step1
+    command: ["python3", "/app/web_server.py"]
+    init: true
+    volumes:
+      - ./node-a/web_server.py:/app/web_server.py:ro
+    networks:
+      - site-a
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    restart: "no"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  sensor:
+    image: ddos-fl-laptop-node-a-sensor:step1
+    command:
+      - suricata
+      - -c
+      - /etc/suricata/suricata.yaml
+      - --af-packet=eth0
+      - --runmode=workers
+      - -l
+      - /var/log/suricata
+    init: true
+    network_mode: "service:web"
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - ./data/node-a/live/eve:/var/log/suricata
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_NICE
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    stop_grace_period: 60s
+    restart: "no"
+  inference:
+    image: ddos-fl-laptop-node-a-ml:step1
+    command:
+      - python3
+      - -B
+      - /app/infer_eve.py
+      - --eve
+      - /eve/eve.json
+      - --model-dir
+      - /model
+      - --output
+      - /predictions/predictions.jsonl
+      - --follow
+      - --start-at-end
+    init: true
+    network_mode: none
+    depends_on:
+      - sensor
+    volumes:
+      - ./scripts:/app:ro
+      - ./models/node-a/local-only-pilot-v1/laptop-01:/model:ro
+      - ./data/node-a/live/eve:/eve:ro
+      - ./data/node-a/live/predictions:/predictions
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 64
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  site-a:
+    internal: true

@@ -1,0 +1,24 @@
+{
+  "purpose": "Reprocess copied benign/SYN PCAP inputs and form new Node A laptop pilot splits; no claim of independent recording sessions",
+  "created_date_local": "2026-11-06",
+  "schema_version": "flow-v2",
+  "seed": 20261018,
+  "captures": {
+    "background-0617": "data/node-a/dataset/pcaps/expanded/source-0617.pcap",
+    "syn-a-train-window": "data/node-a/dataset/pcaps/expanded/syn-a-train-window.pcap",
+    "syn-a-val-window": "data/node-a/dataset/pcaps/expanded/syn-a-val-window.pcap",
+    "syn-a-test-window": "data/node-a/dataset/pcaps/expanded/syn-a-test-window.pcap"
+  },
+  "split_time_blocks_utc": {
+    "background-0617": {
+      "train": ["2018-12-01T17:04:45.928673+00:00", "2018-12-01T17:16:00+00:00"],
+      "validation": ["2018-12-01T17:17:00+00:00", "2018-12-01T17:21:00+00:00"],
+      "test": ["2018-12-01T17:22:00+00:00", "2018-12-01T17:28:00+00:00"]
+    },
+    "syn-a-train-window": {"train": ["2018-12-01T17:30:45+00:00", "2018-12-01T17:30:55+00:00"]},
+    "syn-a-val-window": {"validation": ["2018-12-01T17:31:40+00:00", "2018-12-01T17:31:50+00:00"]},
+    "syn-a-test-window": {"test": ["2018-12-01T17:33:00+00:00", "2018-12-01T17:33:10+00:00"]}
+  },
+  "group_rule": "Canonical bidirectional five-tuple, conservatively exclude every group spanning multiple splits; completed flow must lie wholly inside its assigned time block",
+  "limitations": ["All captures are from the same mirrored recording day.", "Benign enrichment comes mainly from a separate time segment of the same recording.", "This is a reproducible Node A pilot; B/C Non-IID shards and research-scale evaluation remain pending."]
+}
