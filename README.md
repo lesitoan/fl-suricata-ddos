@@ -2,7 +2,7 @@
 
 Môi trường thực hành phát hiện DDoS trên một máy cá nhân: Suricata phân tích traffic, Python trích đặc trưng và mô hình MLP phân loại flow thành `benign` hoặc `attack`. Docker tách dịch vụ, sensor và chương trình suy luận để có thể tái lập môi trường.
 
-**Bản hiện tại triển khai node A với dữ liệu SYN + benign và mô hình local-only.** Node B, node C và FL Server/FedAvg là hướng mở rộng, chưa có trong bản cài này. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers.
+**Bản hiện tại có node A local-only, pipeline train offline và dịch vụ UDP riêng cho node B.** Node B chọn model v2 để test, đã đánh giá trên train/validation; node C và FL Server/FedAvg chưa được triển khai trong bản cài này. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers.
 
 ## Hệ thống làm gì?
 
@@ -400,6 +400,8 @@ reports/                  bằng chứng chạy trên máy, không nằm trong G
 
 Xem [vai trò từng script](scripts/README.md). Các worker `pipeline`/`trainer` mặc định chỉ in `--help` khi gọi bằng `docker compose ... run`; các lệnh train ở trên truyền command rõ ràng.
 
+Trainer dùng chung hiện thay model tại đường dẫn `--output` sau mỗi lần train thành công. Các đường dẫn model trong ví dụ A cũng được sử dụng cố định; không cần tạo thư mục cho từng lần train.
+
 ## Kết quả pilot tham khảo và giới hạn
 
 | Hạng mục đã kiểm | Kết quả |
@@ -418,7 +420,7 @@ Xem [vai trò từng script](scripts/README.md). Các worker `pipeline`/`trainer
 | Không kết nối Docker Engine | Mở Docker Desktop, đợi engine chạy, kiểm `docker version` và OSType Linux |
 | `source=` rỗng trong `--mount` | Khai báo lại `$projectRoot`/các biến đường dẫn trong terminal hiện tại |
 | Không tìm thấy dataset/model | Git không chứa artifact; hoàn tất phần dữ liệu/train hoặc đặt bundle đúng cấu trúc |
-| Output đã tồn tại | Giữ kết quả cũ, kiểm report; chọn run mới thay vì ghi đè |
+| Output có file không thuộc model | Kiểm tra lại đường dẫn; trainer chỉ thay một thư mục model hợp lệ hoặc thư mục rỗng |
 | Chưa có prediction live | Kiểm sensor/inference ready, gửi request mới sau khi follower chạy, đợi flow timeout |
 | Benign bị dự đoán attack | Ghi nhận false positive; không đổi ground truth hoặc tune theo test để ép kết quả |
 | `No module named ...` khi chạy trên Windows | Chạy train/inference trong image ML; script chuẩn bị dữ liệu chỉ cần Python chuẩn |
@@ -430,3 +432,179 @@ Xem [vai trò từng script](scripts/README.md). Các worker `pipeline`/`trainer
 - [Suricata Documentation](https://docs.suricata.io/en/suricata-7.0.10/).
 - [scikit-learn MLPClassifier](https://scikit-learn.org/stable/modules/generated/sklearn.neural_network.MLPClassifier.html).
 - [Flower](https://flower.ai/docs/) và [bài báo FedAvg](https://arxiv.org/abs/1602.05629), cho giai đoạn mở rộng FL.
+
+
+## Node B: train và sử dụng model
+
+B dùng cùng kiểu lệnh Docker Compose/Python như A. Có một đường dẫn model cố định:
+
+```text
+models/node-b/current/
+├── weights.npz
+├── model.json
+├── metrics.json
+└── validation-predictions.csv
+```
+
+Mỗi lần train thành công sẽ thay bộ file ở thư mục này bằng model mới. Trainer ghi và kiểm tra đầy đủ trong thư mục tạm, sau đó thay model cũ; thư mục tạm được dọn khi kết thúc. Nếu train hoặc ghi file lỗi trước khi thay, model cũ vẫn được giữ. Không tạo `runs/` hoặc các thư mục model v2/v3. Cơ chế thay model này nằm trong trainer dùng chung của cả A và B; đường dẫn model A vẫn giữ như phần hướng dẫn A.
+
+B cần bộ chia `data/node-b/work/splits/pilot-v1/{train.csv,validation.csv,test.csv,manifest.json}`. `pilot-v1` là tên bộ chia cố định, không phải số lần train. Cấu hình B ở `config/node-b/node-b-baseline.json`. Thiết lập hiện tại vẫn là MLP 13→32→16→1, 20 epoch, threshold 0,5 và cân trọng số hai nhóm attack có/không có gói trả về theo train.
+
+Chạy tại thư mục dự án, dùng image ML đã build:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-b.yaml config --quiet
+
+docker compose -p ddos-fl-laptop -f compose.node-b.yaml run --rm --no-deps trainer `
+  python3 -B scripts/node-b/train_node_b_pilot.py `
+  --root /workspace `
+  --output /workspace/models/node-b/current
+```
+
+Chạy lại chính lệnh trên để cập nhật model tại cùng đường dẫn. Không cần `train.ps1` hoặc tên run. Compose B chỉ mount dữ liệu B và chỉ đọc train/validation/manifest; không mount test CSV. Entry point B mặc định validation-only.
+
+Khi suy luận, dùng `models/node-b/current` làm model directory; trong container có thể mount chỉ đọc vào `/model` và truyền `--model-dir /model`. Inference đang chạy cần khởi động lại để nạp trọng số mới sau lần train thay model.
+
+Model đang giữ tại thời điểm tổ chức source có validation `[[214,7],[282,933]]` (benign/attack), recall attack 76,79%, balanced accuracy 86,81%. Metadata vẫn giữ ID của lần huấn luyện gốc để truy nguyên. Đây là model thử nghiệm, đã có kiểm tra benign live bên dưới nhưng chưa có đánh giá độc lập. Nhãn family `DrDoS_UDP` trong reference có cả TCP; cấu hình hiện tại giữ nhãn dataset.
+
+
+## Node B: dựng dịch vụ UDP để kiểm tra live từng bước
+
+Dịch vụ `udp-b` là UDP echo cổng 9000, chỉ nằm trong mạng Docker internal `ddos-fl-laptop_site-b`, không publish cổng ra host. Code ở `node-b/udp_server.py`, dùng image sensor hiện có vì đã có Python; chưa cần build image mới.
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml config --quiet
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --wait udp-b
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml ps
+
+docker run --rm `
+  --network ddos-fl-laptop_site-b `
+  --memory 64m --cpus 0.25 `
+  --cap-drop ALL --read-only --tmpfs /tmp `
+  --mount "type=bind,source=$((Get-Location).Path)\scripts\node-b\benign_traffic.py,target=/app/benign_traffic.py,readonly" `
+  ddos-fl-laptop-node-a-sensor:step1 `
+  python3 -B /app/benign_traffic.py
+```
+
+Client gửi đúng 10 request nhỏ, cách nhau khoảng 0,2 giây, chỉ tới tên dịch vụ `udp-b`; chờ phản hồi tối đa 15 giây cho toàn bài kiểm tra. Kết quả mong đợi là `successful: 10`, `errors: []`. Đây là kiểm tra gửi/nhận ứng dụng, không phải đánh giá model. Suricata B được gắn ở bước dưới; sau khi xác nhận EVE mới sẽ nối inference dùng `models/node-b/current`.
+
+Không dùng `--remove-orphans` khi thao tác từng file Compose của dự án: các container A vẫn thuộc cùng project. Chỉ gọi service B cần chạy để giữ trạng thái node A.
+
+
+### Node B: gắn Suricata để ghi EVE live
+
+Sensor riêng tên `sensor-b` dùng network namespace của `udp-b` (`network_mode: service:udp-b`) và bắt `eth0`. Dùng image sensor đã build; output riêng ở `data/node-b/live/eve/`. Khởi động khi Docker đang chạy:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data\node-b\live\eve | Out-Null
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --wait sensor-b
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml ps
+```
+
+Đợi `udp-b` và `sensor-b` healthy rồi chạy lại client 10 request ở phần trên. Suricata ghi flow khi kết nối hết timeout; UDP hai chiều có thể cần chờ khoảng 30–60 giây. Xem EVE bằng:
+
+```powershell
+Get-Content .\data\node-b\live\eve\eve.json -Tail 5
+```
+
+Bằng chứng smoke đã kiểm ở máy phát triển: 10/10 request có phản hồi, khớp 10 flow UDP theo IP/port; mỗi flow có 1 gói đi và 1 gói về, 64 byte mỗi chiều theo bộ đếm Suricata. Chênh lệch `capture.kernel_drops` và `capture.errors` bằng 0. Đây là kiểm tích hợp sensor trên tải nhỏ, chưa đánh giá model. Inference B được nối vào EVE ở phần tiếp theo.
+
+
+### Node B: nối model current với EVE live
+
+Service `inference-b` dùng script chung `scripts/infer_eve.py`, đọc EVE và `models/node-b/current` ở chế độ chỉ đọc, ghi vào `data/node-b/live/predictions/predictions.jsonl`. Container inference không có mạng.
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data\node-b\live\predictions | Out-Null
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --wait inference-b
+
+docker logs --tail 5 ddos-fl-laptop-inference-b-1
+```
+
+Đợi log JSON `status: ready`, kiểm `model_id` và `weights_sha256` đúng model current, rồi chạy lại client UDP 10 request ở phần dịch vụ. Follower dùng `--start-at-end`, bỏ qua EVE cũ và chỉ xử lý sự kiện mới sau khi bắt đầu. Xem kết quả:
+
+```powershell
+Get-Content .\data\node-b\live\predictions\predictions.jsonl -Tail 10
+```
+
+Benign live smoke đã kiểm: 10 request thành công → 10 flow mới → 10 prediction benign; không duplicate/invalid, capture drop/error không tăng. Xác suất attack khoảng 0,145883 tại threshold 0,5. Tính lại từ EVE và trọng số khớp trong sai số số học. Độ trễ từ flow end đến prediction khoảng 34–40 giây trong lần chạy này, bao gồm UDP flow timeout/export và polling; không phải thời gian tính toán riêng của MLP. Đây là kiểm tích hợp trên traffic nhỏ có kiểm soát, chưa chứng minh phát hiện UDP flood hay tổng quát hóa.
+
+Model được nạp lúc inference khởi động. Sau lần train thay model ở đường dẫn cố định, tạo lại riêng inference để bind/nạp model mới:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --force-recreate --no-deps inference-b
+```
+
+UDP B và sensor B cần đang chạy khi dùng lệnh `--no-deps`. Không cần train lại hoặc đổi threshold để chạy smoke; ghi nhận đúng prediction quan sát được.
+
+
+### Node B: UDP burst probe có giới hạn
+
+Bài này gửi 100 UDP datagram 64 byte, tối đa khoảng 20 gói/giây trong khoảng 5 giây, bằng một socket tới cố định `udp-b:9000` trên mạng internal `site-b`. Đây là synthetic burst nhỏ để kiểm tra pipeline/phân loại; chưa phải ground truth CIC-DDoS2019 hoặc phép đo DDoS gây quá tải. Dịch vụ echo vẫn phản hồi bình thường. Không thay model hoặc threshold để ép kết quả attack.
+
+Đảm bảo UDP B/sensor chạy và tạo lại riêng inference để nạp model current mới nhất, bỏ qua EVE cũ:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --wait udp-b sensor-b
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --force-recreate --no-deps inference-b
+
+docker logs --tail 5 ddos-fl-laptop-inference-b-1
+```
+
+Đợi `status: ready` trước khi gửi. Tạo output riêng và chạy probe:
+
+```powershell
+$runDir = Join-Path (Get-Location).Path 'reports\node-b\udp-probe-01'
+if (Test-Path -LiteralPath $runDir) { throw 'Report đã tồn tại; chọn udp-probe-02 để giữ kết quả cũ.' }
+New-Item -ItemType Directory -Path $runDir | Out-Null
+$probeScript = (Resolve-Path '.\scripts\node-b\udp_probe.py').Path
+
+docker run --rm `
+  --network ddos-fl-laptop_site-b `
+  --memory 64m --cpus 0.25 `
+  --cap-drop ALL --security-opt no-new-privileges `
+  --read-only --tmpfs /tmp `
+  --mount "type=bind,source=$probeScript,target=/app/udp_probe.py,readonly" `
+  --mount "type=bind,source=$runDir,target=/report" `
+  ddos-fl-laptop-node-a-sensor:step1 `
+  python3 -B /app/udp_probe.py
+
+python -B .\scripts\node-b\verify_udp_probe.py --run-dir $runDir
+```
+
+Verifier đợi tối đa 75 giây để flow hết timeout và prediction xuất hiện. Một socket thường tạo một aggregated flow/prediction, không phải 100 prediction. Đọc `packets_sent`, số gói Suricata bắt được, `sent_packet_count_matches_capture`, `probability_attack`, `threshold`, `prediction` trong `verification.json`. `MATCHED` nghĩa là đã ghép được pipeline, không tự khẳng định phát hiện DDoS thành công. Nếu prediction là benign, ghi nhận model không đánh dấu burst này là attack; không coi nhãn synthetic là bằng chứng attack thực tế.
+
+`sender.json` ghi số gói/time/port; `flow.json`, `prediction.json`, `verification.json` lưu đối chiếu. Suricata không bắt buộc có event `alert`; ML dùng event `flow`. Script có count/nhịp/deadline cố định, không có tùy chọn đích bên ngoài.
+
+
+### Node B: đối chiếu PCAP UDP có nhãn chưa dùng trong pilot
+
+Máy hiện có một PCAP B `source-0592.pcap`, đã xử lý bằng Suricata thành source EVE/features. Có thể đánh giá bổ sung trên flow UDP chưa dùng; đây vẫn là cùng capture/ngày thu, không phải recording độc lập. Bài kiểm tra offline này không phát gói vào mạng live.
+
+`prepare_udp_evaluation.py` xác minh hash dataset/reference và toàn bộ split A/B, rồi chọn tất cả UDP có nhãn reference, loại unknown, các nhóm kết nối xuất hiện trong mọi tập train/validation/test A/B, nhóm của bài smoke offline 100 flow trước đây và flow giao các khoảng thời gian B đã dùng. Việc chọn chỉ dựa vào quy tắc dữ liệu, không dựa vào prediction. Danh sách cố định và hash model/inputs lưu ở `data/node-b/work/evaluation/labeled-udp/selection.json`.
+
+Lần đầu chuẩn bị selection tại root dự án:
+
+```powershell
+python -B .\scripts\node-b\prepare_udp_evaluation.py
+```
+
+Nếu selection đã được chuẩn bị, giữ nguyên để dùng. Script từ chối ghi đè; model hoặc inputs thay đổi sau khi cố định selection cũng làm evaluator dừng để kiểm tra provenance.
+
+Chấm bằng model current, chỉ mount dữ liệu B và không có mạng:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-b.yaml run --rm --no-deps udp-evaluator `
+  python3 -B /app/node-b/evaluate_udp_dataset.py `
+  --output /reports/udp-dataset-eval
+```
+
+Evaluator đọc raw EVE, tính lại chín đặc trưng và so khớp với từng dòng CSV có nhãn đã chọn, rồi dự đoán theo batch bằng trọng số current. Không fit model/scaler hoặc chỉnh threshold. Kết quả ở `reports/node-b/udp-dataset-eval/{metrics.json,predictions.csv}`; output đã có thì dừng để giữ bằng chứng.
+
+Đọc `confusion_matrix`, `recall_attack` và nhất là `subgroups.attack_no_return`/`attack_has_return`; số lượng giữa hai nhóm chênh lệch lớn. Selection hiện có khoảng 90.442 attack UDP và 9 benign. Benign rất ít nên chưa đủ đánh giá tỷ lệ báo nhầm đáng tin cậy. Kết quả tốt ở cùng PCAP chưa chứng minh tổng quát hóa; đánh giá cuối vẫn cần capture/tập độc lập chưa dùng lựa chọn.

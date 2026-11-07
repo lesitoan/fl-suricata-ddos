@@ -1,0 +1,32 @@
+{
+  "purpose": "Node B laptop UDP/BENIGN pilot; inherited time blocks frozen before local B model fitting",
+  "schema_version": "flow-v2",
+  "seed": 20261018,
+  "captures": [
+    "node-b-source-0592"
+  ],
+  "split_time_blocks_utc": {
+    "node-b-source-0592": {
+      "train": [
+        "2018-12-01T16:37:10+00:00",
+        "2018-12-01T16:43:30+00:00"
+      ],
+      "validation": [
+        "2018-12-01T16:44:00+00:00",
+        "2018-12-01T16:51:00+00:00"
+      ],
+      "test": [
+        "2018-12-01T16:51:30+00:00",
+        "2018-12-01T16:54:50+00:00"
+      ]
+    }
+  },
+  "group_rule": "Canonical bidirectional five-tuple; exclude every group shared with ANY A split or spanning B splits; each completed flow must fit wholly inside one time block",
+  "limitations": [
+    "All samples come from a single recording day and one PCAP member; time blocks are not independent recording sessions.",
+    "The B pilot includes only explicitly CSV-matched BENIGN and DrDoS_UDP; unmatched flows are excluded.",
+    "No FL or unseen-family generalization conclusion follows from local-only results."
+  ],
+  "pretraining_revision_note": "Time blocks inherited from the prior verified pilot. No current model metric was used to choose the windows.",
+  "created_date_local": "2026-11-07"
+}

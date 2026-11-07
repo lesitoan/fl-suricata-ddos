@@ -1,0 +1,68 @@
+name: ddos-fl-laptop
+include:
+  - compose.node-b-live.yaml
+
+services:
+  trainer:
+    image: ddos-fl-laptop-node-a-ml:step1
+    profiles: [tools]
+    network_mode: none
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    working_dir: /workspace
+    mem_limit: 1g
+    cpus: 0.75
+    pids_limit: 128
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+      - ./config/node-b:/workspace/config/node-b:ro
+      - type: bind
+        source: ./data/node-b/work/splits/pilot-v1/train.csv
+        target: /workspace/data/node-b/work/splits/pilot-v1/train.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-b/work/splits/pilot-v1/validation.csv
+        target: /workspace/data/node-b/work/splits/pilot-v1/validation.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-b/work/splits/pilot-v1/manifest.json
+        target: /workspace/data/node-b/work/splits/pilot-v1/manifest.json
+        read_only: true
+        bind: {create_host_path: false}
+      - ./models/node-b:/workspace/models/node-b
+    command: [python3, -B, scripts/node-b/train_node_b_pilot.py, --help]
+
+  udp-evaluator:
+    image: ddos-fl-laptop-node-a-ml:step1
+    profiles: [tools]
+    network_mode: none
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    working_dir: /app
+    mem_limit: 1g
+    cpus: 0.75
+    pids_limit: 128
+    volumes:
+      - ./scripts:/app:ro
+      - ./data/node-b/dataset/derived/suricata/node-b-source-0592:/source:ro
+      - type: bind
+        source: ./data/node-b/dataset/reference/node-b-reference.csv.gz
+        target: /reference.csv.gz
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-b/work/evaluation/labeled-udp/selection.json
+        target: /selection.json
+        read_only: true
+        bind: {create_host_path: false}
+      - ./models/node-b/current:/model:ro
+      - ./reports/node-b:/reports
+    command: [python3, -B, /app/node-b/evaluate_udp_dataset.py, --help]

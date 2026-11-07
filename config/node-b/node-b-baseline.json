@@ -1,0 +1,27 @@
+{
+  "experiment_id": "node-b-laptop-local-only-pilot-v2",
+  "scope": "Development run v2 on the frozen B train/validation splits; response-group weighting from train only; dataset labels retained including TCP; no independent test or FL claim",
+  "schema_version": "flow-v2",
+  "transform": "flow-v2-fixed-log-v1",
+  "seed": 20261018,
+  "hidden_layer_sizes": [
+    32,
+    16
+  ],
+  "activation": "relu",
+  "solver": "adam",
+  "learning_rate_init": 0.001,
+  "alpha": 0.0001,
+  "batch_size": 256,
+  "epochs": 20,
+  "threshold": 0.5,
+  "class_weight_rule": "Benign total n/2; attack without return packets n/4; attack with return packets n/4; group counts from train only",
+  "model_selection": "highest validation balanced accuracy; first epoch wins ties",
+  "test_access": "Validation-only development run; test CSV is not mounted or evaluated",
+  "runtime_limits": {
+    "cpus": 0.75,
+    "memory": "1g",
+    "network": "none"
+  },
+  "sample_weighting": "class_and_attack_response"
+}
