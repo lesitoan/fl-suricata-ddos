@@ -1,0 +1,43 @@
+name: ddos-fl-laptop
+include:
+  - compose.node-c-live.yaml
+
+services:
+  trainer:
+    image: ddos-fl-laptop-node-a-ml:step1
+    profiles: [tools]
+    network_mode: none
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    working_dir: /workspace
+    mem_limit: 1g
+    cpus: 0.75
+    pids_limit: 128
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+      - ./config/node-c:/workspace/config/node-c:ro
+      - type: bind
+        source: ./data/node-c/work/splits/pilot-v1/train.csv
+        target: /workspace/data/node-c/work/splits/pilot-v1/train.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/work/splits/pilot-v1/validation.csv
+        target: /workspace/data/node-c/work/splits/pilot-v1/validation.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/work/splits/pilot-v1/test.csv
+        target: /workspace/data/node-c/work/splits/pilot-v1/test.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/work/splits/pilot-v1/manifest.json
+        target: /workspace/data/node-c/work/splits/pilot-v1/manifest.json
+        read_only: true
+        bind: {create_host_path: false}
+      - ./models/node-c:/workspace/models/node-c
+    command: [python3, -B, scripts/node-c/train_node_c_pilot.py, --help]

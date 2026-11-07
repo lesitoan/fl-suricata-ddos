@@ -1,0 +1,46 @@
+{
+  "node_id": "C",
+  "schema_version": "flow-v2",
+  "seed": 20261018,
+  "capture_assignments": {
+    "node-c-source-392": "train",
+    "node-c-source-401": "validation",
+    "node-c-source-430": "test"
+  },
+  "excluded_capture_ids": [
+    "node-c-source-443"
+  ],
+  "split_time_blocks_utc": {
+    "node-c-source-392": {
+      "train": [
+        "2018-12-01T15:24:37+00:00",
+        "2018-12-01T15:24:47+00:00"
+      ]
+    },
+    "node-c-source-401": {
+      "validation": [
+        "2018-12-01T15:25:57+00:00",
+        "2018-12-01T15:26:07+00:00"
+      ]
+    },
+    "node-c-source-430": {
+      "test": [
+        "2018-12-01T15:30:25+00:00",
+        "2018-12-01T15:30:36+00:00"
+      ]
+    }
+  },
+  "group_rule": "Canonical bidirectional five-tuple; exclude any group in ANY frozen A/B split, then every group spanning C splits; whole flow must fit inside assigned time block",
+  "minimum_class_rows_per_split": 30,
+  "preprocessing_fitted": false,
+  "resampling_applied": false,
+  "selection_rule": "Chronological capture roles/time windows inherited from pretraining protocol; no current model metrics used",
+  "limitations": [
+    "Selected short pieces of one continuous recording day, not independent capture sessions.",
+    "Boundary flows may be truncated by PCAP sharding; completed EVE flows are not early attack detection.",
+    "Pilot selected for verified LDAP and benign coverage; background/class imbalance may bias results.",
+    "Only explicitly timestamp/5tuple-matched BENIGN and DrDoS_LDAP are eligible; unknown excluded.",
+    "A/B frozen splits remain unchanged; one seed only; no FL or generalization claim."
+  ],
+  "scope": "Laptop C local-only pilot, before current model fitting"
+}

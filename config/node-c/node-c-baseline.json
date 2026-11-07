@@ -1,0 +1,27 @@
+{
+  "experiment_id": "node-c-laptop-local-only-pilot",
+  "scope": "New local training from reprocessed LDAP/BENIGN C inputs on one laptop; no FL, live LDAP reflection or independent generalization claim",
+  "schema_version": "flow-v2",
+  "transform": "flow-v2-fixed-log-v1",
+  "seed": 20261018,
+  "hidden_layer_sizes": [
+    32,
+    16
+  ],
+  "activation": "relu",
+  "solver": "adam",
+  "learning_rate_init": 0.001,
+  "alpha": 0.0001,
+  "batch_size": 256,
+  "epochs": 20,
+  "threshold": 0.5,
+  "class_weight_rule": "n_train / (2 * train_class_count); train only",
+  "model_selection": "highest validation balanced accuracy; first epoch wins ties",
+  "test_access": "Evaluate once after selecting checkpoint; no threshold tuning on test",
+  "runtime_limits": {
+    "cpus": 0.75,
+    "memory": "1g",
+    "network": "none"
+  },
+  "sample_weighting": "class_balanced"
+}

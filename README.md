@@ -2,7 +2,7 @@
 
 Môi trường thực hành phát hiện DDoS trên một máy cá nhân: Suricata phân tích traffic, Python trích đặc trưng và mô hình MLP phân loại flow thành `benign` hoặc `attack`. Docker tách dịch vụ, sensor và chương trình suy luận để có thể tái lập môi trường.
 
-**Bản hiện tại có node A local-only, pipeline train offline và dịch vụ UDP riêng cho node B.** Node B chọn model v2 để test, đã đánh giá trên train/validation; node C và FL Server/FedAvg chưa được triển khai trong bản cài này. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers.
+**Bản hiện tại có node A local-only, pipeline train offline và dịch vụ UDP riêng cho node B.** Node B chọn model v2 để test, đã đánh giá trên train/validation; node C có baseline local đã train, FL Server/FedAvg chưa được triển khai trong bản cài này. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers.
 
 ## Hệ thống làm gì?
 
@@ -608,3 +608,200 @@ docker compose -p ddos-fl-laptop -f compose.node-b.yaml run --rm --no-deps udp-e
 Evaluator đọc raw EVE, tính lại chín đặc trưng và so khớp với từng dòng CSV có nhãn đã chọn, rồi dự đoán theo batch bằng trọng số current. Không fit model/scaler hoặc chỉnh threshold. Kết quả ở `reports/node-b/udp-dataset-eval/{metrics.json,predictions.csv}`; output đã có thì dừng để giữ bằng chứng.
 
 Đọc `confusion_matrix`, `recall_attack` và nhất là `subgroups.attack_no_return`/`attack_has_return`; số lượng giữa hai nhóm chênh lệch lớn. Selection hiện có khoảng 90.442 attack UDP và 9 benign. Benign rất ít nên chưa đủ đánh giá tỷ lệ báo nhầm đáng tin cậy. Kết quả tốt ở cùng PCAP chưa chứng minh tổng quát hóa; đánh giá cuối vẫn cần capture/tập độc lập chưa dùng lựa chọn.
+
+
+## Node C: dữ liệu LDAP và chia tập
+
+Input C nằm riêng ở `data/node-c/dataset`: ba PCAP `pcaps/expanded/source-{392,401,430}.pcap` và reference `reference/node-c-reference.csv.gz`. Reference hiện dùng projection có nhãn DrDoS_LDAP/BENIGN và provenance trong manifest dữ liệu; không phải model hoặc feature table sao chép từ lần train trước.
+
+Xử lý mỗi PCAP bằng image Suricata hiện có vào `derived/suricata/node-c-source-<id>/eve.json`. Với từng capture, gọi script ghép nhãn chung:
+
+```powershell
+$id = 392  # lặp lại với 401 và 430
+python -B .\scripts\match_suricata_reference.py `
+  --capture-id "node-c-source-$id" `
+  --eve "data/node-c/dataset/derived/suricata/node-c-source-$id/eve.json" `
+  --reference-csv data/node-c/dataset/reference/node-c-reference.csv.gz `
+  --output "data/node-c/dataset/derived/suricata/node-c-source-$id/flows-v2.csv" `
+  --attack-label DrDoS_LDAP --utc-offset-hours 4 --tolerance-seconds 3
+```
+
+Sau khi cả ba báo cáo ghép nhãn đã kiểm tra, chia C trên host bằng Python chuẩn:
+
+```powershell
+python -B .\scripts\node-c\split_node_c_pilot.py
+```
+
+Cấu hình `config/node-c/node-c-expansion.json` cố định 392→train, 401→validation, 430→test theo các cửa sổ thời gian. Script kiểm hash toàn bộ A/B split và nguồn C, loại unknown, nhóm có trong bất kỳ tập A/B, nhóm giao nhiều tập C và observation trùng; yêu cầu cả hai lớp đủ tối thiểu 30 dòng mỗi tập. Không dùng prediction để chọn dữ liệu.
+
+Kết quả nằm ở `data/node-c/work/splits/pilot-v1/{train.csv,validation.csv,test.csv,manifest.json}` và `reports/node-c/split-pilot.json`. Script từ chối ghi đè split đã có hoặc còn dở. Ba đoạn thuộc cùng một ngày/recording; chia theo capture này chưa tạo bằng chứng tổng quát hóa độc lập. Mốc này chuẩn bị dữ liệu C; chưa huấn luyện C hoặc FL.
+
+
+### Node C: script train local MLP bằng Docker
+
+C dùng trainer chung `scripts/train_mlp.py` qua entry point `scripts/node-c/train_node_c_pilot.py`. Cấu hình ở `config/node-c/node-c-baseline.json`: MLP13→32→16→1, seed20261018, 20epoch, threshold0,5, trọng số cân lớp chỉ tính từ train. Chọn checkpoint bằng validation trước khi đánh giá test. Đây là baseline cục bộ LDAP/BENIGN theo nhãn reference, chưa có FL hoặc xác minh LDAP reflection live.
+
+Dùng image ML sẵn có; kiểm tra Compose và CLI trước khi train:
+
+```powershell
+docker compose -p ddos-fl-laptop --profile tools -f compose.node-c.yaml config --quiet
+
+docker compose -p ddos-fl-laptop -f compose.node-c.yaml run --rm --no-deps trainer
+```
+
+Lệnh mặc định chỉ in `--help`. Khi thực sự train, truyền command rõ ràng:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-c.yaml run --rm --no-deps trainer `
+  python3 -B scripts/node-c/train_node_c_pilot.py `
+  --root /workspace `
+  --output /workspace/models/node-c/current
+```
+
+Container không có mạng, chỉ đọc script/config và bốn file split C; chỉ thư mục model C được ghi. Không mount dữ liệu A/B. Kết quả cố định `models/node-c/current/{weights.npz,model.json,metrics.json,test-predictions.csv}`. Train thành công thay model cũ bằng bộ file mới; lỗi trước khi thay giữ model cũ. Không tạo thư mục cho từng phiên bản/run. Nếu đang phát triển cấu hình sau baseline, dùng `--validation-only` để không chấm lại test trong vòng lựa chọn.
+
+Lúc chuẩn bị source, trainer đã được kiểm tra bằng dữ liệu giả về CLI/config/schema, chọn checkpoint/export, portable inference và thay model/giữ model cũ khi lỗi; chưa chạy dữ liệu C thật. Không suy ra hội tụ hoặc khả năng tổng quát hóa từ việc script chạy xong.
+
+
+Kết quả baseline C do người dùng chạy và đã đối chiếu: train đủ20epoch, chọn epoch1 vì validation balanced accuracy bằng nhau và lấy epoch sớm nhất. Test33.199flow có confusion `[[110,8],[14,33067]]` (benign/attack), recall attack99,9577%, balanced accuracy96,5890%, FPR6,7797% trên118benign. Cả14attack có gói trả về trong test bị bỏ sót (9UDP/5TCP theo nhãn reference); nhóm33.067attack không có gói trả về đều được phát hiện. Kết quả tổng bị chi phối bởi nhóm attack lớn; chưa kiểm LDAP live, hội tụ hoặc khả năng tổng quát hóa. Model C current đã nạp và tái tính prediction bằng inference runtime chung, sai số tối đa0.0 so với file đã lưu. Xem báo cáo/model tại các thư mục artifact riêng trên máy; không đưa artifact vào Git.
+
+
+### Node C: smoke test EVE → inference trước live
+
+Dùng helper chung `scripts/check_eve_model.py` để lấy tối đa100flow từ tập test đã đánh giá, chọn theo UID/nhãn/nhóm có hoặc không có gói trả về. Đây là mẫu kiểm tích hợp có chủ đích bao phủ trường hợp, không phải tập test mới hoặc ước lượng độ chính xác toàn bộ. Các metric test đầy đủ trong model current vẫn là baseline chính.
+
+Chuẩn bị mẫu (chỉ lần đầu cho một thư mục report):
+
+```powershell
+python -B .\scripts\check_eve_model.py prepare --node c --run-dir reports/node-c/eve-smoke
+```
+
+Helper kiểm hash model/manifest/split/source EVE, ghép source row UID và đối chiếu chín đặc trưng, rồi tạo `sample.eve.json` và `expected.json`. Mẫu C hiện gồm50benign,36attack không có gói trả về,14attack có gói trả về. Nhãn/expected probability không nằm trong EVE đưa vào model; expected dùng để xác minh sau.
+
+Chạy shared inference bằng Docker:
+
+```powershell
+$projectRoot = (Get-Location).Path
+$runDir = Join-Path $projectRoot 'reports\node-c\eve-smoke'
+
+docker run --rm `
+  --network none --memory 512m --cpus 0.75 `
+  --read-only --tmpfs /tmp --cap-drop ALL `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app,readonly" `
+  --mount "type=bind,source=$projectRoot\models\node-c\current,target=/model,readonly" `
+  --mount "type=bind,source=$runDir\sample.eve.json,target=/input.eve.json,readonly" `
+  --mount "type=bind,source=$runDir,target=/output" `
+  ddos-fl-laptop-node-a-ml:step1 `
+  python3 -B /app/infer_eve.py `
+  --eve /input.eve.json --model-dir /model `
+  --output /output/predictions.jsonl --once `
+  > (Join-Path $runDir 'inference.log')
+
+python -B .\scripts\check_eve_model.py verify --run-dir $runDir
+```
+
+Kết quả ở `reports/node-c/eve-smoke/verification.json`: cần đủ số prediction/signature, model hash và xác suất khớp bản export đã lưu. `PASS integration` không yêu cầu mọi nhãn đều được dự đoán đúng; phải giữ nguyên lỗi đã biết. Không chạy append lại inference vào cùng output: dùng report folder mới nếu cần lặp và giữ bằng chứng trước. Bước này không gửi traffic mạng, không train hoặc chỉnh threshold; sau đó mới chuẩn bị dịch vụ LDAP/sensor live cho C.
+
+
+### Node C: dịch vụ LDAP/UDP và kiểm tra query/reply
+
+C dùng fixture LDAP tối giản trên UDP/389, phục vụ truy vấn rootDSE ẩn danh với filter `(objectClass=*)`, scope baseObject và các thuộc tính cố định của lab. Đây là một phần giao thức phục vụ kiểm tích hợp, không phải LDAP directory/Active Directory đầy đủ. Cách đóng gói phản hồi `SearchResultEntry` rồi `SearchResultDone` theo [Microsoft LDAP Search Over UDP](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/3fad0ec9-414c-432a-ba0b-837c74091dd6), với BER từ [RFC 4511](https://www.rfc-editor.org/rfc/rfc4511.html). Không suy ra LDAP reflection hoặc DDoS từ bài kiểm này.
+
+Source gồm `scripts/ldap_protocol.py` dùng chung để mã hóa/đọc thông điệp, `node-c/ldap_server.py` phục vụ rootDSE và `scripts/node-c/benign_traffic.py` gửi đúng10query, nghỉ0,2giây giữa query, deadline15giây. Client kiểm message ID, result code và giá trị thuộc tính trong phản hồi. Không chỉ kiểm port389 hoặc echo payload.
+
+Dùng image sensor sẵn có, không cần build thêm. Chạy tại root dự án:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml config --quiet
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml up -d --wait ldap-c
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml ps ldap-c
+```
+
+`ldap-c` cần trạng thái `healthy`. Network `ddos-fl-laptop_site-c` là internal và service không publish port ra host. Compose C chính cũng include file live này; trainer chỉ chạy khi gọi rõ service/profile tools. Vì A/B/C dùng các file Compose riêng trong cùng project, cảnh báo orphan có thể xuất hiện; giữ các container đó, không dùng `--remove-orphans`.
+
+Gửi10truy vấn hợp lệ từ container tạm trong đúng mạng C:
+
+```powershell
+$projectRoot = (Get-Location).Path
+docker run --rm `
+  --network ddos-fl-laptop_site-c --memory 64m --cpus 0.25 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app,readonly" `
+  ddos-fl-laptop-node-a-sensor:step1 `
+  python3 -B /app/node-c/benign_traffic.py
+
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml logs --tail 15 ldap-c
+```
+
+Cần `requests:10`, `successful:10`, `errors:[]`; mỗi query trong cấu hình hiện tại gửi77byte, nhận91byte, message ID khớp, result code0. Log server có `rootdse_search` với IP/port của client. Bài kiểm ban đầu đã đạt10/10; bằng chứng tại `reports/node-c/ldap-service-smoke-01/verification.json` trên máy thực hiện. Báo cáo không được đưa vào Git.
+
+Mốc query/reply ban đầu chỉ xác minh dịch vụ LDAP. Phần dưới hướng dẫn gắn Suricata để ghi flow; model inference là bước tiếp theo. Không train lại hoặc thay threshold từ kết quả smoke.
+
+
+### Node C: Suricata live ghi flow LDAP
+
+`compose.node-c-live.yaml` hiện có `sensor-c` dùng chung network namespace với `ldap-c`, bắt trên `eth0` và ghi `data/node-c/live/eve/{eve.json,suricata.log}`. Sensor dùng image Suricata hiện có, giới hạn768MiB/1CPU; không mount dataset hoặc model. Healthcheck yêu cầu engine đã khởi động và EVE tiếp tục cập nhật.
+
+Chuẩn bị thư mục output và khởi động riêng sensor C:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data\node-c\live\eve | Out-Null
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml config --quiet
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml up -d --wait sensor-c
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml ps ldap-c sensor-c
+```
+
+Khi cả hai service healthy, chạy lại lệnh gửi10query ở phần trước. Flow UDP chỉ được ghi sau khi hết timeout, vì vậy chờ khoảng30–45giây hoặc lâu hơn nếu hệ thống bận, rồi xem các bản ghi flow mới nhất:
+
+```powershell
+Get-Content .\data\node-c\live\eve\eve.json -Tail 200 |
+  Select-String -Pattern '"event_type"\s*:\s*"flow"' |
+  Select-Object -Last 10 |
+  ForEach-Object { $_.Line | ConvertFrom-Json } |
+  Select-Object flow_id,src_ip,src_port,dest_ip,dest_port,proto,
+    @{n='to_server';e={$_.flow.pkts_toserver}},
+    @{n='to_client';e={$_.flow.pkts_toclient}}
+```
+
+Đối chiếu IP/port và thời gian với JSON sender, không chỉ đếm các flow bất kỳ trong EVE. Trong bài kiểm ban đầu:10query thành công, đủ10flow UDP, mỗi flow1gói tới server và1gói trả về,119/133byte tương ứng (payload77/91byte cộng Ethernet/IPv4/UDP). Client đã kiểm cấu trúc LDAP/message ID/thuộc tính; Suricata bản hiện tại ghi `app_proto:failed`, vì vậy không dùng trường này để khẳng định parser đã nhận diện LDAP. Chín feature `flow-v2` vẫn tính hợp lệ từ counter và thời gian của EVE.
+
+Bằng chứng cố định tại `reports/node-c/ldap-sensor-smoke-01/{sender.json,verification.json,matched.eve.jsonl,flow-features.json}`. Trong khoảng kiểm tra, kernel drops/capture errors/decoder invalid không tăng. Các container A/B và service LDAP C không bị recreate/restart, model C giữ nguyên hash. Mốc sensor này chỉ kiểm thu thập flow của traffic benign có kiểm soát. Phần dưới ghi cách nối shared inference với model `models/node-c/current`; chưa kiểm tấn công LDAP.
+
+
+### Node C: dự đoán live từ EVE bằng model current
+
+`inference-c` trong `compose.node-c-live.yaml` dùng shared `scripts/infer_eve.py` và image ML sẵn có. Container không có mạng, chỉ đọc source chung, model `models/node-c/current` và EVE C; ghi `data/node-c/live/predictions/predictions.jsonl`. Không mount dataset hoặc dữ liệu A/B. Model không được fit lại trong inference.
+
+Chuẩn bị output và khởi động:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data\node-c\live\predictions | Out-Null
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml config --quiet
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml up -d --wait inference-c
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml logs --tail 5 inference-c
+```
+
+Lúc bắt đầu, log cần có `status:ready`, `model_id:node-c-laptop-local-only-pilot`, đúng SHA256 weights trong model contract và `mode:follow`. `ldap-c`/`sensor-c` phải healthy, inference chạy liên tục. Chế độ `--follow --start-at-end` chỉ theo dõi flow ghi mới sau khi tiến trình bắt đầu; không tự chấm toàn bộ EVE lịch sử. Chạy lại lệnh gửi10query LDAP ở trên sau khi inference ready.
+
+Chờ flow UDP hết timeout và xem prediction:
+
+```powershell
+Get-Content .\data\node-c\live\predictions\predictions.jsonl -Tail 10 |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Select-Object flow_id,probability_attack,threshold,prediction,
+    seconds_from_flow_end_to_score,model_id
+```
+
+Prediction không chứa label của scenario. Muốn đối chiếu phải ghép query với EVE bằng IP/port/thời gian, rồi ghép prediction bằng `event_signature_sha256` và kiểm model hash; không chỉ dựa vào10dòng cuối. `probability_attack` so với threshold0,5 quyết định nhãn dự đoán; đây không phải accuracy.
+
+Bài kiểm live ban đầu đạt10query/10flow/10prediction khớp signature, cả10dự đoán benign, p_attack khoảng0,405140–0,405143. Tính lại batch từ đúng EVE/model có sai số tối đa1,67e-16; không fit/tune. Delay cuối flow→score31,03–40,42giây (trung bình35,17giây) gồm thời gian Suricata đợi flow hết timeout, không phải thời gian model tính toán riêng. Kernel drops/capture errors/decoder invalid không tăng. Bằng chứng tại `reports/node-c/ldap-live-smoke-01/{verification.json,matched.eve.jsonl,matched.predictions.jsonl,numeric-verification.json}` trên máy kiểm tra.
+
+Kết quả này xác minh pipeline live với10query benign có kiểm soát, chưa đánh giá tấn công LDAP, tổng quát hóa hoặc FL. Baseline test đầy đủ và lỗi attack có gói trả về đã biết vẫn giữ nguyên.
+
+Model được nạp một lần khi inference khởi động. Sau khi train lại thành công vào cùng thư mục current, tạo lại riêng inference C để nạp bộ weights mới và cập nhật bind mount:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml up -d --no-deps --force-recreate inference-c
+```
+
+Kiểm lại log ready/model hash trước khi gửi traffic mới. Không cần tạo model v2/v3 hoặc đổi output path.

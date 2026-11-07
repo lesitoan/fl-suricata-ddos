@@ -1,0 +1,134 @@
+name: ddos-fl-laptop
+
+services:
+  ldap-c:
+    image: ddos-fl-laptop-node-a-sensor:step1
+    command: [python3, -B, /app/ldap_server.py]
+    init: true
+    volumes:
+      - type: bind
+        source: ./node-c/ldap_server.py
+        target: /app/ldap_server.py
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./scripts/ldap_protocol.py
+        target: /app/ldap_protocol.py
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [site-c]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    restart: "no"
+    healthcheck:
+      test: [CMD, python3, -B, /app/ldap_server.py, --healthcheck]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  sensor-c:
+    image: ddos-fl-laptop-node-a-sensor:step1
+    command:
+      - suricata
+      - -c
+      - /etc/suricata/suricata.yaml
+      - --af-packet=eth0
+      - --runmode=workers
+      - -l
+      - /var/log/suricata
+    init: true
+    network_mode: service:ldap-c
+    depends_on:
+      ldap-c:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./data/node-c/live/eve
+        target: /var/log/suricata
+        bind: {create_host_path: false}
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_ADMIN, SYS_NICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    stop_grace_period: 60s
+    restart: "no"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "from pathlib import Path; import time; p=Path('/var/log/suricata/eve.json'); log=Path('/var/log/suricata/suricata.log'); assert p.is_file() and time.time()-p.stat().st_mtime<15 and log.is_file() and 'Engine started' in log.read_text()"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  inference-c:
+    image: ddos-fl-laptop-node-a-ml:step1
+    command:
+      - python3
+      - -B
+      - /app/infer_eve.py
+      - --eve
+      - /eve/eve.json
+      - --model-dir
+      - /model
+      - --output
+      - /predictions/predictions.jsonl
+      - --follow
+      - --start-at-end
+    init: true
+    network_mode: none
+    depends_on:
+      sensor-c:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app:ro
+      - type: bind
+        source: ./models/node-c/current
+        target: /model
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/live/eve
+        target: /eve
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/live/predictions
+        target: /predictions
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 64
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  site-c:
+    internal: true

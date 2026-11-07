@@ -170,7 +170,7 @@ def main(node_id, limitation, *, validation_only_default=False):
                         help='Do not load or evaluate test CSV (default for node B)')
     args = parser.parse_args()
     root, out = args.root, args.output
-    if node_id not in ('A', 'B'):
+    if node_id not in ('A', 'B', 'C'):
         raise ValueError('Unsupported node')
     node = 'node-' + node_id.lower()
     cfg_path = root / (args.config if args.config is not None else Path(f'config/{node}/{node}-baseline.json'))
