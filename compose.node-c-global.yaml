@@ -1,0 +1,14 @@
+# Overlay for compose.node-c-live.yaml. Select global inference explicitly.
+services:
+  inference-c:
+    volumes:
+      - type: bind
+        source: ./models/fl/current
+        target: /model
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-c/live/predictions-global
+        target: /predictions
+        read_only: false
+        bind: {create_host_path: false}

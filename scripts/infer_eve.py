@@ -1,5 +1,6 @@
 """Score completed Suricata flow events with a portable Node A pilot model."""
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -101,33 +102,45 @@ class Scorer:
 
 def follow(path, scorer, start_at_end, poll_seconds):
     path = Path(path)
-    while not path.exists():
-        time.sleep(poll_seconds)
-    with path.open('rb') as stream:
-        if start_at_end:
-            stream.seek(0, os.SEEK_END)
-        inode = os.fstat(stream.fileno()).st_ino
-        pending = b''
-        while True:
-            chunk = stream.readline()
-            if chunk:
-                pending += chunk
-                if not pending.endswith(b'\n'):
-                    continue
-                scorer.process(pending.decode('utf-8', errors='replace'))
-                pending = b''
-                continue
-            try:
-                current = path.stat()
-                if current.st_ino != inode or current.st_size < stream.tell():
-                    stream.close()
-                    stream = path.open('rb')
-                    inode = os.fstat(stream.fileno()).st_ino
+    while True:
+        try:
+            stream = path.open('rb')
+        except FileNotFoundError:
+            time.sleep(poll_seconds)
+            continue
+
+        with stream:
+            if start_at_end:
+                stream.seek(0, os.SEEK_END)
+                start_at_end = False
+            inode = os.fstat(stream.fileno()).st_ino
+            offset = stream.tell()
+            pending = b''
+            while True:
+                try:
+                    chunk = stream.readline()
+                except OSError as error:
+                    if error.errno != errno.ENODATA:
+                        raise
+                    # A Docker Desktop bind mount can report ENODATA during a read.
+                    # Retry from the last returned byte, preserving any partial line.
+                    stream.seek(offset)
+                    chunk = b''
+                if chunk:
+                    offset += len(chunk)
+                    pending += chunk
+                    if not pending.endswith(b'\n'):
+                        continue
+                    scorer.process(pending.decode('utf-8', errors='replace'))
                     pending = b''
                     continue
-            except FileNotFoundError:
-                pass
-            time.sleep(poll_seconds)
+                try:
+                    current = path.stat()
+                    if current.st_ino != inode or current.st_size < offset:
+                        break
+                except FileNotFoundError:
+                    pass
+                time.sleep(poll_seconds)
 
 
 def main():

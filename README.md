@@ -1171,3 +1171,54 @@ Mean balanced accuracy theo node của global là83,74%, bộ3local là98,53%. P
 Đánh giá đã hoàn tất, nhưng chưa thể coi global đạt chất lượng triển khai: B bỏ sót2426attack; C bỏ sót5302attack và báo nhầm25/118benign. Không tự tune từ kết quả này. Local/global có lượng huấn luyện khác nhau nên đây là đối chiếu trên cùng test, chưa cô lập hiệu quả FL. Các test vẫn thuộc recording pilot hiện có; A/C đã được xem trước đó khi phát triển local, không phải recording/ngày độc lập.
 
 Bằng chứng tại thư mục output, gồm REPORT.md dễ đọc, comparison.csv để tổng hợp và predictions.csv có row_uid/nhãn thật/xác suất/dự đoán cả hai model. Audit máy hiện tại thêm audit.json: toàn bộ global/local files, config/manifest/test hash và13container giữ nguyên;4service FL healthy. Bước này hoàn thành đánh giá test offline, chưa chuyển global vào inference live.
+
+
+## FL bước 11: chuẩn bị demo global tại node A
+
+`compose.node-a-global.yaml` là override dùng cùng `compose.node-a-live.yaml`, chỉ đổi hai bind mount của service inference: `/model` đọc models/fl/current read-only, `/predictions` ghi vào data/node-a/live/predictions-global. Web, sensor, mạng site-a và code suy luận dùng lại bản local. Chọn override để chạy global, bỏ override để dùng lại baseline; hai lựa chọn dùng cùng service inference nên không chạy đồng thời hai model trong service đó.
+
+Kiểm cấu hình và khả năng nạp global trước khi bật dịch vụ:
+
+```powershell
+python -B .\scripts\node-a\prepare_global_demo.py
+```
+
+Cần `PASS node A global demo preparation`, đúng hash checkpoint đang chọn và `services_started:false`, `traffic_sent:false`. Script kiểm Compose hiệu lực đúng project/mount/access/network, giữ nguyên cấu hình gốc và model files; tạo thư mục predictions-global nếu chưa có. Một container tạm networknone nạp global bằng infer_eve.py và chấm một EVE flow giả, output chỉ nằm trong /tmp container rồi tự xóa. Không dùng EVE thật, mở socket hoặc tạo prediction demo giả trên host. Báo cáo chuẩn bị lưu reports/node-a/global-demo-preparation.json và được cập nhật khi kiểm lại thành công.
+
+Khi chuẩn bị PASS, bước khởi động demo là:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-a-live.yaml -f compose.node-a-global.yaml up -d --wait web sensor inference
+
+docker compose -p ddos-fl-laptop -f compose.node-a-live.yaml -f compose.node-a-global.yaml logs --tail 20 inference
+```
+
+Giữ cảnh báo orphan, không thêm --remove-orphans: các container B/C/FL thuộc cùng project nhưng không nằm trong hai file chọn cho demo A. Không dùng compose down cho bước này. Khởi động chỉ gồm ba dịch vụ node A, không submit FL hoặc train. Nếu inference được đổi từ local sang global, Compose sẽ tạo lại service inference theo mounts đã chọn.
+
+Trong log inference cần thấy `status:ready`, `model_id:laptop-fedavg-mlp`, `threshold:0.5`, `mode:follow` và weights_sha256 đúng model đang demo. Với checkpoint hiện tại, SHA256 là `40852d1ec9497aa9bd6849eecb91ecb04f863ec2264c13203d2db7976fde62c7`. Inference nạp model lúc khởi động; nếu thay global/current sau đó thì cần kiểm/nạp lại trước khi phát traffic demo.
+
+Kết quả global sẽ nằm tại data/node-a/live/predictions-global/predictions.jsonl. --start-at-end chỉ theo dõi các dòng EVE mới; sau khi ba dịch vụ sẵn sàng mới phát request/probe. Cần đợi Suricata xuất completed flow rồi mới có prediction. Thư mục predictions cũ của local được giữ riêng.
+
+Để quay về inference local, dùng lại compose.node-a-live.yaml không kèm override và khởi động rõ service inference:
+
+```powershell
+docker compose -p ddos-fl-laptop -f compose.node-a-live.yaml up -d --no-deps inference
+```
+
+Lần chuẩn bị ngày11/11/2026 đã PASS qua Docker Compose thực và scorer trong image ML: nạp đúng global vòng4, flow giả đi qua trích đặc trưng→portable predictor→JSONL thành công. Hash cấu hình gốc/model và13container trước/sau giữ nguyên. Mốc source FL/test trước demo đã ở commit8b3ab82. Chưa bật dịch vụ hoặc phát traffic ở bước chuẩn bị này; kết quả chưa chứng minh bắt gói live hoặc chất lượng phát hiện DDoS. Bước kế tiếp mới khởi động node A, gửi request bình thường rồi SYN probe giới hạn trong mạng Docker lab và đối chiếu EVE/prediction.
+
+
+## FL bước 12 · Demo global live tại node B và C
+
+Khởi động từng node bằng file live và override global tương ứng.
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data\node-b\live\predictions-global, .\data\node-c\live\predictions-global | Out-Null
+
+docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml -f compose.node-b-global.yaml up -d --wait udp-b sensor-b inference-b
+docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml -f compose.node-c-global.yaml up -d --wait ldap-c sensor-c inference-c
+```
+
+Hai override mount `models/fl/current` ở chế độ chỉ đọc và ghi prediction vào thư mục của từng node. Đọc log inference để kiểm tra hash checkpoint sau khi khởi động. Chạy `benign_traffic.py` của từng node trong container trên mạng site nội bộ tương ứng rồi đối chiếu request, flow EVE và prediction theo cổng nguồn, thời gian, chữ ký sự kiện và hash model.
+
+Node B trả đủ 10 UDP echo và node C trả đủ 10 truy vấn LDAP rootDSE qua UDP. Global vòng 4 chấm cả 20 flow là `benign`. Khoảng từ lúc flow kết thúc tới lúc ghi prediction là 31,33–40,72 giây tại B và 31,52–40,04 giây tại C trong lần kiểm này. Báo cáo nằm tại `reports/node-b/global-live-benign-check.json` và `reports/node-c/global-live-benign-check.json`.
