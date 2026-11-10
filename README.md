@@ -2,7 +2,7 @@
 
 Môi trường thực hành phát hiện DDoS trên một máy cá nhân: Suricata phân tích traffic, Python trích đặc trưng và mô hình MLP phân loại flow thành `benign` hoặc `attack`. Docker tách dịch vụ, sensor và chương trình suy luận để có thể tái lập môi trường.
 
-**Bản hiện tại có node A local-only, pipeline train offline và dịch vụ UDP riêng cho node B.** Node B chọn model v2 để test, đã đánh giá trên train/validation; node C có baseline local đã train, FL Server/FedAvg chưa được triển khai trong bản cài này. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers.
+**Bản hiện tại có baseline MLP local A/B/C và Flower FedAvg chạy bằng một server cùng ba client Docker.** Đã chạy smoke/pilot5vòng và đánh giá global/local trên test A/B/C. Global còn yếu ở B/C; kết quả hiện tại chưa xác nhận hội tụ, dữ liệu ghi độc lập hoặc phát hiện live bằng global. Các lệnh bên dưới dành cho Windows PowerShell và Docker Linux containers; dataset/model/reports cần chuẩn bị riêng, không có sẵn khi clone Git.
 
 ## Hệ thống làm gì?
 
@@ -805,3 +805,369 @@ docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml up -d --no-deps --f
 ```
 
 Kiểm lại log ready/model hash trước khi gửi traffic mới. Không cần tạo model v2/v3 hoặc đổi output path.
+
+
+## FL bước 1: cấu hình chung và kiểm tra đầu vào
+
+`config/fl/fedavg.json` khai báo hợp đồng MLP/feature, lịch smoke1/pilot5/main50round, local1epoch,3client A/B/C, trọng số FedAvg theo số dòng train và mapping đường dẫn baseline/split. Dự kiến `fl-client-a/b/c` nằm trong file Compose của từng node, profile `fl`; `compose.fl.yaml` sẽ chứa server và mạng FL chung. Mốc bước1 chỉ tạo cấu hình và preflight; image runtime Flower được chuẩn bị ở bước2 bên dưới. Các service FL chưa được tạo.
+
+Chạy từ root dự án bằng Python trên Windows, không cần NumPy hoặc Flower trên host:
+
+```powershell
+python -B .\scripts\check_fl_inputs.py
+```
+
+Cần thấy `result: PASS FL input preflight`, `total_train_rows:114301` với bộ dữ liệu hiện tại và `cross_partition_row_and_group_overlap:false`. Script kiểm hash config/manifest/CSV/model artifacts, schema, labels/counts, feature hữu hạn, transform, kiến trúc và các tensor float64 hữu hạn; kiểm không giao row UID hoặc connection group giữa chín tập train/validation/test A/B/C. Lưu ý: cùng group có thể có nhiều observation trong cùng một tập; đó không phải giao giữa các tập.
+
+Script chỉ đọc dữ liệu, không fit model, không đánh giá xác suất mới hoặc chọn hyperparameter bằng test. Đây là công cụ kiểm tra trên host, không phải FL Server chứa dữ liệu ba node. Test được kiểm hash/identity/schema cho provenance, không dùng để train hoặc chọn checkpoint. Giữ nguyên class_balanced ở A/C và class_and_attack_response ở B; local sample_weight khác với trọng số FedAvg. Đường dẫn A vẫn dùng baseline hiện có; không cần di chuyển model để theo cấu hình.
+
+Muốn lưu một báo cáo mới dưới reports/fl:
+
+```powershell
+python -B .\scripts\check_fl_inputs.py --output reports/fl/preflight.json
+```
+
+Output đã tồn tại thì script dừng để giữ bằng chứng; bỏ `--output` để chạy kiểm lại trên console. Bản kiểm ban đầu đã đạt, báo cáo tại reports/fl/preflight.json. Dữ liệu/model được ghim hash trong config; nếu chủ động thay inputs cần kiểm lại provenance và cập nhật cấu hình, không bỏ qua lỗi hash để chạy tiếp. `PASS` chưa chứng minh Flower đã được cài, client kết nối, FedAvg hoạt động hoặc model hội tụ. Bước tiếp theo là image/runtime FL với phiên bản được ghim sau kiểm tương thích.
+
+
+## FL bước 2: build image Flower dùng chung
+
+Image `ddos-fl-laptop-fl:step1` kế thừa image ML hiện có, thêm [Flower1.43.0](https://pypi.org/project/flwr/1.43.0/). Giữ NumPy2.4.3/scikit-learn1.8.0/SciPy1.18.1 và các package ML nền. `fl/requirements.txt` ghim57package runtime/ML đã giải trên Linux/Python3.13; không cài extra simulation/Ray. Dockerfile chỉ copy dependency list và runtime checker, không copy dataset/model vào image. Image này sẽ dùng cho server và ba client ở các bước sau.
+
+Sau khi đã build image ML ở phần cài đặt, chạy tại root dự án:
+
+```powershell
+docker build --tag ddos-fl-laptop-fl:step1 --file .\fl\Dockerfile .
+```
+
+Build cần Internet để tải package. Bước kiểm tra chạy được khi tắt mạng và không mount dữ liệu:
+
+```powershell
+docker run --rm `
+  --network none --memory 512m --cpus 0.75 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  ddos-fl-laptop-fl:step1
+```
+
+Lệnh mặc định chỉ chạy `fl/check_runtime.py`, rồi container tự xóa. Cần thấy `result:PASS FL runtime image`, `pip_check:PASS`, versions flwr1.43.0/numpy2.4.3/scikit-learn1.8.0, `numpy_arrayrecord_roundtrip:true`. Script kiểm import ServerApp/ClientApp/FedAvg, CLI executables, support sample_weight trong MLP.partial_fit và chuyển mảng NumPy qua ArrayRecord không đổi dữ liệu. Không fit model hoặc mở server.
+
+Có thể xem lệnh điều phối sẽ dùng ở bước sau:
+
+```powershell
+docker run --rm --network none ddos-fl-laptop-fl:step1 flower-superlink --help
+docker run --rm --network none ddos-fl-laptop-fl:step1 flower-supernode --help
+```
+
+Dockerfile tắt telemetry và tự cài dependencies lúc chạy app; các dependency cần thiết được cài sẵn khi build. Image nền/tag và các container local hiện tại giữ nguyên. Báo cáo kiểm image thực tế ở reports/fl/runtime-image.json. Image đã có thư viện nhưng chưa có chương trình train FL, service Compose, mạng FL hoặc kết nối client/server. Bước tiếp theo sẽ chuẩn bị chương trình/app và runtime tối thiểu theo từng phần, client nằm trong Compose của node tương ứng.
+
+
+## FL bước 3: bộ xử lý MLP dùng chung cho client/server
+
+`fl/mlp_adapter.py` giữ hợp đồng13→32→16→1 và dùng lại transform, portable predictor, cách cân mẫu và metric từ scripts chung. Module chưa kết nối mạng hoặc đọc dataset; nó nhận các mảng được truyền vào. Các thao tác gồm khởi tạo global weights chung theo seed, kiểm sáu tensor hệ số/bias, nạp weights không fit giả, train một local update và đánh giá không fit.
+
+Mỗi lần `train_round` tạo estimator/Adam mới, nạp đúng global weights rồi gọi partial_fit theo local_epochs. Các epoch bên trong một vòng dùng cùng optimizer; đầu vòng sau reset optimizer theo cấu hình. A/C dùng class_balanced; B dùng class_and_attack_response, tính weights chỉ từ labels/data train truyền vào. `num_examples` là số dòng train thật, không nhân local_epochs hoặc lấy tổng sample_weight. Mảng global đầu vào không bị sửa tại chỗ. Hash tensor chuẩn hóa dùng kiểm chu trình khác với SHA256 của file weights.npz khi export.
+
+Để không dùng bước train giả lúc nạp weights, adapter có một đoạn khởi tạo nội bộ được khóa cho scikit-learn1.8.0; không tự nâng phiên bản mà bỏ kiểm tra tương thích. Chưa lưu checkpoint hoặc thay model local trong bước này.
+
+Kiểm tra bằng256dòng dữ liệu giả trong Docker, không cần build lại image:
+
+```powershell
+$projectRoot = (Get-Location).Path
+docker run --rm `
+  --network none --memory 512m --cpus 0.75 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  --mount "type=bind,source=$projectRoot\fl,target=/app/fl,readonly" `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app/scripts,readonly" `
+  --mount "type=bind,source=$projectRoot\config\fl,target=/app/config/fl,readonly" `
+  ddos-fl-laptop-fl:step1 `
+  python3 -B /app/fl/check_mlp_adapter.py
+```
+
+Cần `result:PASS FL MLP adapter`, `initialization_without_fit:true`, `optimizer_reset_each_round_verified:true` và `flower_array_roundtrip:true`. Checker xác minh initialization tái lập/seed khác đổi weights, nạp chính xác weights dù local seed khác, portable inference khớp sklearn, Flower ArrayRecord không đổi tensor, cập nhật một batch khớp gradient/Adam tính độc lập và round2 nhận global mới/reset moment. Đồng thời kiểm output count/weighting A/B/C, evaluation không đổi weights và từ chối tensor sai shape/dtype/NaN/thiếu mảng.
+
+Lần kiểm ban đầu đạt993tham số, portable error0, gradient/Adam error tối đa6,94e-17. Bằng chứng tại reports/fl/mlp-adapter.json. Đây là kiểm thuật toán bằng dữ liệu giả; không mount dataset hoặc baseline A/B/C, không chạy federation hoặc chứng minh chất lượng model. Các file Python được mount read-only nên chưa cần thêm vào image; bước tiếp theo mới chuẩn bị ClientApp đọc đúng train/validation của node và ServerApp điều phối FedAvg.
+
+
+## FL bước 4: ClientApp dùng chung cho A/B/C
+
+`fl/client_app.py` là một Flower1.43 ClientApp dùng chung; node-id và project-root lấy từ cấu hình SuperNode cục bộ. Khi import, module chỉ đăng ký handler, không mở kết nối hoặc tự train. `fl/local_data.py` kiểm manifest/schema/hash và chỉ đọc đúng train.csv/validation.csv của node. Ba service client sẽ được đặt trong Compose A/B/C ở bước tích hợp sau; bước này chưa thêm service hoặc chạy federation.
+
+Ba thao tác đã chuẩn bị:
+
+| Message | Client thực hiện | Phản hồi |
+|---|---|---|
+| query.properties | Kiểm config/manifest của node, không đọc CSV | ID, schema/hash, cách cân mẫu, số dòng train/validation khai báo |
+| train | Kiểm global weights/hash; đọc train.csv và gọi shared MLP adapter | Weights cập nhật, số dòng train thật, loss/thời gian và metadata đối chiếu |
+| evaluate | Đọc validation.csv, đánh giá global weights nhận được, không fit | Validation loss/BA/F1/recall/FPR, confusion counts, attack response subgroup counts |
+
+Client không nạp baseline model, không đọc test.csv hoặc dữ liệu node khác. Eval sau mỗi round dùng validation; đánh giá test sẽ là job riêng sau khi chọn model. Weights sáu tensor được đọc theo key0..5, không phụ thuộc thứ tự map. Phản hồi không chứa từng dòng dữ liệu hoặc prediction theo flow.
+
+Hợp đồng message dành cho bước viết ServerApp: content train/evaluate gồm ArrayRecord `arrays` và ConfigRecord `config`; config có `schema-version`, `fl-config-sha256`, `server-round`, `parameters-sha256`, và có thể có `local-epochs` đúng giá trị đã chốt. query.properties chỉ có config với schema-version/fl-config-sha256. Đường dẫn, node-id, split hoặc hyperparameter khác không được server override qua message. Config hash là SHA256 của file config; parameter hash là canonical tensor hash từ adapter, không phải hash NPZ.
+
+Chạy kiểm bằng dữ liệu giả, không cần build lại image:
+
+```powershell
+$projectRoot = (Get-Location).Path
+docker run --rm `
+  --network none --memory 512m --cpus 0.75 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  --mount "type=bind,source=$projectRoot\fl,target=/app/fl,readonly" `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app/scripts,readonly" `
+  --mount "type=bind,source=$projectRoot\config\fl,target=/app/config/fl,readonly" `
+  ddos-fl-laptop-fl:step1 `
+  python3 -B /app/fl/check_client_app.py
+```
+
+Cần `result:PASS FL ClientApp`. Với mỗi node giả, checker tạo256train/64validation và một test.csv bị cấm đọc trong /tmp, dispatch message Flower trực tiếp (metadata giả, không chạy network runtime), kiểm properties/train/evaluate/round2, đúng số mẫu và trọng số so với adapter. Guard theo dõi file access đảm bảo train chỉ đọc train, evaluate chỉ đọc validation, không đọc test/node khác/baseline; evaluate không gọi train. Có39case từ chối sai hash/schema/epoch/round hoặc đường dẫn và server override không hợp lệ. Checker còn cố đảo thứ tự array map để kiểm decoding theo key.
+
+Báo cáo kiểm thực tế tại reports/fl/client-app.json. Đây là kiểm chức năng bằng files/message giả, chưa kiểm kết nối SuperNode→SuperLink, app bundle hoặc huấn luyện trên dataset thật. Bước tiếp theo: ServerApp FedAvg tương thích hợp đồng message này, sau đó mới ghép Docker/Compose và chạy một vòng kiểm thử.
+
+
+## FL bước 5: ServerApp FedAvg và checkpoint global
+
+`fl/server_app.py` đăng ký Flower ServerApp, khởi tạo một global MLP chung và dùng `StrictFedAvg`, lớp kế thừa [FedAvg của Flower](https://flower.ai/docs/framework/main/en/ref-api/flwr.serverapp.strategy.FedAvg.html). Server chỉ đọc config FL, không đọc dataset/EVE/PCAP hoặc baseline của node. Source chưa được đóng gói thành app bundle hay đưa vào service Compose trong bước này.
+
+Trước train, server đợi đúng ba SuperNode và query.properties để lập mapping transportID→A/B/C; kiểm nodeID duy nhất, hash config/manifest và chính sách cân mẫu. Mỗi round yêu cầu đủ3train reply và3validation reply đúng schema/hash/round/số mẫu; weights phải đủ6tensor float64 đúng shape và hữu hạn. Thiếu, trùng, lỗi, sai count hoặc sai global hash làm run dừng, không lặng lẽ gộp phần client còn lại. Phép gộp model dùng implementation Flower FedAvg với num-examples là số dòng train thật.
+
+Checkpoint chọn theo trung bình balanced accuracy validation của ba node (mỗi node một phiếu), hòa chọn round sớm. Báo cáo pooled cộng TN/FP/FN/TP rồi tính lại metric, không lấy trung bình tỷ lệ rồi gọi là pooled. Server kiểm tỷ lệ validation khớp confusion/subgroup counts. Không đưa test vào selection hoặc tự kết luận hội tụ từ số round.
+
+Kiểm server bằng client giả, không cần build lại image:
+
+```powershell
+$projectRoot = (Get-Location).Path
+docker run --rm `
+  --network none --memory 768m --cpus 0.75 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  --mount "type=bind,source=$projectRoot\fl,target=/app/fl,readonly" `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app/scripts,readonly" `
+  --mount "type=bind,source=$projectRoot\config\fl,target=/app/config/fl,readonly" `
+  ddos-fl-laptop-fl:step1 `
+  python3 -B /app/fl/check_server_app.py
+```
+
+Cần `result:PASS FL ServerApp`, `weighted_fedavg_matches_reference:true`, `strict_three_clients_verified:true`, `two_round_clientapp_serverapp_integration:true` và `failed_run_preserves_previous_global_model:true`. Bài kiểm có18negative cases; dùng fake Grid push/pull và task identity/messageID giả cho Flower1.43. Tất cả files train/validation/checkpoint phục vụ bài kiểm nằm trong /tmp; không mount dataset/model thật. Server role có file access guard riêng để phát hiện đọc nhầm dữ liệu node.
+
+Checker kiểm phép gộp với n=2/3/5 so phép tính độc lập, macro-node khác pooled khi kích thước validation khác nhau, tie checkpoint, hai round với ClientApp, nạp export bằng live inference runtime và hash tensor export khớp round được chọn. Nó còn kiểm run bị lỗi giữ nguyên global model cũ, run thành công seed mới thay cùng current mà không sinh model v2/v3. Bằng chứng thực tế ở reports/fl/server-app.json. Các số liệu synthetic chỉ xác minh chương trình, không phải accuracy DDoS hoặc bằng chứng networking.
+
+Khi chạy qua deployment runtime ở bước sau, ServerApp dùng run-config `project-root` (mặc định /workspace), `num-rounds` (không vượt config.training.rounds) và `timeout-seconds` (mặc định300). Chỉ sau khi toàn bộ round yêu cầu hoàn tất train+validation hợp lệ, server mới publish bộ3file models/fl/current/{weights.npz,model.json,metrics.json} bằng cơ chế thay bundle an toàn. Baseline A/B/C giữ nguyên. History/trạng thái từng round lưu reports/fl/training.json; lock .server-run-lock chặn hai run ghi chung output. Run mới khởi tạo lại từ seed; bước này chưa có resume sau khi tiến trình bị tắt đột ngột.
+
+History chứa identity/hash, metrics theo node, thời gian vòng, raw model array bytes và byte của cây object Flower đã serialize cho train/evaluate. Đây là byte logic, chưa đo HTTP/TLS/cache/network overhead hoặc discovery/app-bundle transfer. Lần kiểm hiện tại không tạo global model/report training thật trên host: mọi artifact mô phỏng ở /tmp bị xóa khi checker kết thúc.
+
+Bước tiếp theo: đóng gói app chỉ gồm source/config, sau đó thêm fl-server vào compose.fl.yaml và fl-client-a/b/c trong Compose từng node (profile fl), rồi kiểm kết nối mạng và một round thật. Không chạy50round khi mới chỉ kiểm source.
+
+
+## FL bước 6: đóng gói app và chuẩn bị Compose
+
+Root `pyproject.toml` khai báo ServerApp/ClientApp và allowlist tệp cho Flower App Bundle (FAB). `fl/build_bundle.py` chỉ đọc đúng11tệp source/config đã duyệt, không duyệt thư mục dataset, rồi kiểm danh sách ZIP, giải nén/import hai app từ gói. FAB hiện khoảng75KB, gồm11tệp và .info/CONTENT, không có PCAP/EVE/CSV/weights hoặc báo cáo. Mặc định app là1round smoke; config/fl vẫn cho phép run chính tối đa50round khi chủ động chọn sau này. `local-lab` là nhãn publisher của bundle cục bộ; bước này không publish Flower Hub.
+
+Theo bố trí đã chốt:
+
+| File | Dịch vụ FL bổ sung |
+|---|---|
+| compose.fl.yaml | fl-server (SuperLink, subprocess ServerApp) |
+| compose.node-a.yaml | fl-client-a (SuperNode, subprocess ClientApp A) |
+| compose.node-b.yaml | fl-client-b (SuperNode, subprocess ClientApp B) |
+| compose.node-c.yaml | fl-client-c (SuperNode, subprocess ClientApp C) |
+
+Cả bốn dùng image ddos-fl-laptop-fl:step1 và profile fl; không tự chạy khi dùng profile tools hoặc chạy local pipeline. Không inherit worker mount của node A. Server chỉ có configfl read-only và runtime/model/report FL riêng; mỗi client chỉ có configfl và đúng3file train.csv/validation.csv/manifest.json của node read-only, runtime riêng writable. Không mount test, dataset thô, baseline hoặc Docker socket. Source sẽ được gửi qua FAB; không mount cả source/dataset vào server/client.
+
+Mạng ddos-fl-laptop_federation được khai báo internal ở Compose server, không publish port ra host/LAN. Client dùng external:true để tham chiếu chính mạng do server tạo; external ở đây không có nghĩa kết nối Internet. Bốn service chỉ nối mạng federation, tách site-a/b/c. FLWR_HOME trỏ vào mount runtime riêng; server dùng SQLite ở runtime để lưu trạng thái Flower. Profile fl chưa đồng nghĩa đã train: SuperLink/SuperNode chỉ chạy app khi nhận lệnh submit run.
+
+Chạy tại root dự án bằng Python trên Windows; không cần cài Flower/NumPy trên host hoặc rebuild image:
+
+```powershell
+python -B .\scripts\prepare_fl_deployment.py
+```
+
+Script sẽ kiểm lại inputs, tạo thư mục runtime/output, gọi container tạm networknone để build/kiểm FAB, lưu reports/fl/bundles/ddos-fl-laptop.fab, rồi chạy docker compose config cho từng file. Nó kiểm đúng image/profile/network/mount/access/identity, ghi reports/fl/deployment-check.json. Chạy lại được; bundle/report cố định chỉ được thay sau khi build/kiểm thành công. Không gọi compose up/run cho các service FL hoặc submit train. Việc kiểm dùng một container tạm để đóng gói; container đó tự xóa.
+
+Cần thấy `result:PASS FL bundle and Compose`, `server_has_no_node_data_mounts:true`, `clients_mount_only_own_train_validation_manifest:true`, `services_started:false`, `training_started:false`. Bản kiểm ban đầu đạt; cấu hình các dịch vụ/mạng local trước đó đã đối chiếu giữ nguyên. File fl/connection.toml có kết nối CLI tên docker trỏ fl-server:8000; đã kiểm đọc được trong container networknone, chưa kiểm kết nối.
+
+Không gộp các Compose node/server vào một lệnh nhiều -f: các node có tool service trùng tên và quy ước network ownership khác nhau. Bước khởi động sau sẽ tạo server/mạng trước, rồi gọi riêng từng Compose với đúng tên fl-client, giữ nguyên container orphan của node khác. Healthcheck hiện kiểm TCP runtime API; số client thực sự đăng ký và app execution sẽ được kiểm riêng ở bước sau.
+
+Đây là chuẩn bị gói và cấu hình tĩnh, chưa xác minh startup bốn container, kết nối qua mạng hoặc chạy một round dataset thật. Bước tiếp theo là khởi động server/ba client và kiểm kết nối trước khi submit smoke1round. Không chạy50round ngay sau bước này.
+
+Tham khảo [FAB allowlist](https://flower.ai/docs/framework/how-to-configure-pyproject-toml.html) và [Flower Configuration/FLWR_HOME](https://flower.ai/docs/framework/1.43/en/ref-flower-configuration.html). Runtime image vẫn ghim Flower1.43.0, và bundle dùng format0 được phiên bản này hỗ trợ; không tự thay license hoặc phiên bản model hiện có.
+
+
+## FL bước 7: khởi động bốn dịch vụ và kiểm kết nối
+
+Sau khi bước6 PASS, khởi động server trước để tạo mạng federation, rồi chỉ định đúng client ở từng Compose. Các lệnh này không submit app hoặc train:
+
+```powershell
+docker compose -p ddos-fl-laptop --profile fl -f compose.fl.yaml up -d --no-deps --wait fl-server
+
+docker compose -p ddos-fl-laptop --profile fl -f compose.node-a.yaml up -d --no-deps --wait fl-client-a
+docker compose -p ddos-fl-laptop --profile fl -f compose.node-b.yaml up -d --no-deps --wait fl-client-b
+docker compose -p ddos-fl-laptop --profile fl -f compose.node-c.yaml up -d --no-deps --wait fl-client-c
+```
+
+Giữ nguyên cảnh báo orphan, không thêm --remove-orphans. Với explicit service và --no-deps, các lệnh không bật lại web/UDP/LDAP/sensor/inference local. FL train offline dùng CSV đã chuẩn bị nên không yêu cầu chạy lại Suricata để bắt đầu federation.
+
+Kiểm kết nối thực bằng Python trên host:
+
+```powershell
+python -B .\scripts\check_fl_connection.py
+```
+
+Cần `result:PASS FL connectivity`, `online_clients:3`, cả4service running/healthy, `network_internal:true` và `runtime_mount_isolation_verified:true`. Ở mốc trước lần train đầu tiên cần `registered_runs:0`, `no_runs_registered:true`. Checker kiểm Docker inspect/health/image/network và mounts thực, gọi Flower CLI đọc server online list, đối chiếu ID online với SuperNode ID trong log A/B/C. Node ID là chuỗi số64bit do Flower cấp, không phải A/B/C cố định; sau khi restart có thể thay đổi. Không giả định thứ tự server list là thứ tự node.
+
+Checker chỉ dùng container CLI tạm và không gửi run. Nó không start/stop/recreate các service. Sau các lần train sau này, registered_runs có thể lớn hơn0; kết nối vẫn PASS nếu các client còn online. Để lưu snapshot mới có thể dùng --output reports/fl/connectivity.json; file có sẵn thì giữ lại, bỏ --output để kiểm trên console.
+
+Lần khởi động ban đầu đã kiểm đạt qua HTTP Control/Fleet API:4service healthy,3online ID khớp A/B/C,0run; mạng internal/không host ports và mount đúng. Bằng chứng reports/fl/connectivity.json, kèm startup audit trong cùng thư mục reports/fl. Model baseline, config và FAB hash không đổi; chưa tạo models/fl/current. Các container local cũ giữ nguyên trạng thái, không bị restart bởi bước này.
+
+Có thể xem trạng thái/log khi cần:
+
+```powershell
+docker ps --filter label=com.docker.compose.project=ddos-fl-laptop
+docker compose -p ddos-fl-laptop --profile fl -f compose.fl.yaml logs --tail 30 fl-server
+docker compose -p ddos-fl-laptop --profile fl -f compose.node-a.yaml logs --tail 20 fl-client-a
+```
+
+Đây mới là kiểm runtime kết nối; app chưa được submit để chạy trên dữ liệu thật. Bước tiếp theo sẽ submit đúng1round smoke, kiểm global weights/validation/output và lỗi runtime nếu có, rồi mới cân nhắc pilot5round hoặc run chính. Không suy ra app đã train/hội tụ từ trạng thái healthy.
+
+
+## FL bước 8: một vòng train thật và kiểm model global
+
+Chỉ bắt đầu sau khi bước7 có đủ3client online. Chạy tại root dự án. Có thể kiểm đầu vào và gói app trước, không gửi run:
+
+```powershell
+python -B .\scripts\run_fl.py --rounds 1 --check-only
+```
+
+Cần `PASS FL submission inputs`, `training_started:false`. Lệnh dùng preflight trên host để kiểm tính toàn vẹn/không trùng partitions, rồi giải nén FAB đã kiểm hash trong container networknone. Preflight có đọc test để kiểm provenance/overlap; không tính metric test hoặc dùng test để train/chọn model.
+
+Khi chủ động muốn train, lệnh sau tạo **một run mới từ seed chung**, không tiếp tục checkpoint trước. Không chạy lại nếu chỉ muốn xem kết quả run đã hoàn tất:
+
+```powershell
+python -B .\scripts\run_fl.py --rounds 1
+```
+
+Số vòng phải được ghi rõ; script không mặc định chạy50round. Nó kiểm kết nối, từ chối run đang hoạt động/lock output, chỉ mount FAB source-only, biên bản đóng gói và cấu hình kết nối vào container CLI tạm. Flower1.43 nhận đường dẫn source app: gói FAB được giải nén trong /tmp rồi gọi `flwr run ... docker --run-config num-rounds=1`. Container submit không mount dữ liệu train hoặc model. Không có cơ chế retry tự động; nếu mất phản hồi sau submit, kiểm run đang tồn tại trước khi gửi lại.
+
+Phản hồi có `success:true` và `run-id` nghĩa là server đã nhận run, chưa có nghĩa train xong. Biên nhận được lưu cố định tại reports/fl/last-submission.json. Xem tiến trình trong reports/fl/training.json hoặc log fl-server. Khi `status:complete`, kiểm kết quả bằng:
+
+```powershell
+python -B .\scripts\check_fl_result.py
+```
+
+Cần `PASS FL trained checkpoint` và `run_status:finished:completed`. Checker đối chiếu số vòng, đủ A/B/C, số mẫu train thật, hash artifacts, quy tắc chọn checkpoint và trạng thái Flower. Sau đó ba container đánh giá độc lập, mỗi container chỉ mount validation/manifest của chính node và cùng global model read-only, networknone; không mount train/test. `fl/check_global_model.py` kiểm portable inference khớp sklearn và tính lại confusion/loss/BA/recall/FPR khớp validation của round được chọn, không fit. Lệnh check không train lại hoặc thay checkpoint. Có thể dùng `--output reports/fl/<ten-moi>.json` để lưu báo cáo mới, không ghi đè bằng chứng đã có.
+
+Sau run thành công, output cố định là:
+
+```text
+models/fl/current/
+├── weights.npz
+├── model.json
+└── metrics.json
+```
+
+Run thành công sau thay bộ current này; không tạo model v2/v3. Baseline local A/B/C giữ nguyên. Checkpoint chỉ publish sau đủ tất cả round yêu cầu, chọn mean balanced accuracy validation của ba node, hòa giữ round sớm. Chưa đưa global vào các dịch vụ inference live.
+
+Lần kiểm thật đầu tiên ngày11/11/2026 đã hoàn tất đúng1round, mỗi node1local epoch, FedAvg theo số dòng train A68928/B11796/C33577. Run ID7941808649286261911, global weights SHA256 `cf9d41214902b2a7901f4b38378d3ef73c1de086c2fc7df7e63b94bb91aa7004`. Thời gian phần round khoảng24,77giây; toàn bộ ServerApp khoảng42,46giây. Đây là số đo của lần chạy này, không phải cam kết thời gian cho máy khác.
+
+| Validation trên global sau round1 | Số dòng | Balanced accuracy | Recall attack | False positive rate |
+|---|---:|---:|---:|---:|
+| A | 59456 | 94,78% | 89,84% | 0,28% |
+| B | 1436 | 65,74% | 33,74% | 2,26% |
+| C | 33214 | 92,03% | 84,06% | 0,00% |
+
+Mean balanced accuracy theo node là84,18%. Kết quả xác nhận luồng client→FedAvg→validation→export hoạt động; recall B còn thấp và chưa đủ bằng chứng hội tụ hoặc tốt hơn local baseline. Chưa đánh giá test global hoặc dữ liệu ghi độc lập. Bước tiếp theo là pilot5round có chủ đích, xem diễn biến validation và checkpoint trước khi chạy dài hơn; không tự tăng số vòng hay chỉnh threshold từ kết quả test.
+
+Bằng chứng máy hiện tại nằm ở reports/fl/training.json, smoke-one-round.json và smoke-one-round-audit.json. Model export đã được chấm lại trên cả3validation, portable/sklearn error0. Audit xác nhận14hash config/FAB/artifacts baseline không đổi và13container hiện có giữ nguyên ID/trạng thái/start/finish/restart;4service FL vẫn healthy. Bộ scripts kiểm và README thuộc source; dataset/model/reports là artifacts riêng được Git bỏ qua.
+
+
+## FL bước 9: pilot 5 vòng và xem diễn biến validation
+
+Sau smoke1round PASS, chạy pilot với số vòng ghi rõ. Đây là run mới khởi tạo lại từ seed chung; không cộng thêm5vòng vào checkpoint smoke:
+
+```powershell
+python -B .\scripts\run_fl.py --rounds 5
+```
+
+Lệnh trả biên nhận sau submit; đợi reports/fl/training.json có status complete rồi kiểm checkpoint bằng `python -B .\scripts\check_fl_result.py`. Nếu chỉ muốn xem lại model hiện có thì dùng lệnh check, không gửi lại run. Sau thành công, global/current được thay bằng checkpoint được chọn; baseline A/B/C giữ nguyên. Không cần build lại image, FAB hoặc chạy lại Suricata khi source/config/dataset không đổi.
+
+Lần pilot ngày11/11/2026 đã hoàn tất5/5vòng qua cả3client, mỗi node1epoch/vòng, run ID6618119074863593551. Giữ nguyên seed, manifests,9features, transform, kiến trúc, threshold0,5 và FedAvg theo số dòng train. Tổng phần xử lý5round khoảng94,92giây trong lần đo này. Kết quả validation:
+
+| Vòng | Mean balanced accuracy theo node | Recall tấn công B | Validation loss B |
+|---|---:|---:|---:|
+| 1 | 84,184242% | 33,74% | 1,0570 |
+| 2 | 86,745989% | 42,30% | 1,7027 |
+| 3 | 86,745989% | 42,30% | 2,2546 |
+| **4 — được chọn** | **86,746553%** | **42,30%** | **2,5427** |
+| 5 | 86,746271% | 42,30% | 3,0156 |
+
+Server chọn vòng4 theo balanced accuracy trung bình cao nhất. Vòng4 và5 rất sát nhau nhưng không bằng nhau; quy tắc giữ vòng sớm chỉ dùng khi điểm bằng nhau. Global weights hiện tại SHA256 `40852d1ec9497aa9bd6849eecb91ecb04f863ec2264c13203d2db7976fde62c7`.
+
+| Validation của checkpoint vòng4 | Balanced accuracy | Recall attack | False positive rate |
+|---|---:|---:|---:|
+| A | 99,85% | 99,98% | 0,28% |
+| B | 70,02% | 42,30% | 2,26% |
+| C | 90,37% | 84,06% | 3,33% |
+
+Mean BA tăng2,56điểm phần trăm so vòng1, nhưng cải thiện khác nhau giữa các node. B vẫn bỏ sót701/1215attack validation:230/626mẫu không có gói chiều về và471/589mẫu có gói chiều về. Recall B không tăng từ vòng2đến5, trong khi loss tăng; chưa thể kết luận đã hội tụ hoặc chỉ cần tăng số vòng là khắc phục được. C có4false positives trên120benign, vì vậy FPR3,33% được tính từ số mẫu benign ít.
+
+Trên cùng validation1436dòng với manifest đã pin, baseline local B đã ghi recall76,79% và BA86,81%; global vòng4 đạt recall42,30% và BA70,02%. Đây là đối chiếu kết quả trên cùng split, không phải benchmark công bằng về lượng huấn luyện vì local/global có ngân sách train khác nhau. Nguyên nhân có thể liên quan dữ liệu khác phân phối và ảnh hưởng của từng client; pilot này chưa chứng minh nguyên nhân. Bước tiếp theo là phân tích lỗi B và đối chiếu local/global trước khi quyết định thay đổi thí nghiệm hoặc chạy dài hơn.
+
+Kiểm checkpoint/export thực tế đã PASS: chấm lại từng validation trong container riêng, portable/sklearn error0 và confusion/metrics khớp vòng4. Audit xác nhận14hash config/FAB/baselineartifacts và13container giữ nguyên,4serviceFL healthy. Không đánh giá test global, chỉnh threshold, phát traffic hoặc đưa global vào inference live trong pilot này.
+
+Evidence được lưu cố định tại reports/fl/pilot-five-rounds.json, pilot-five-rounds-training.json, pilot-five-rounds-audit.json và pilot-five-rounds-diagnostics.json. Báo cáo smoke1round trước đó vẫn được giữ riêng; models chỉ có một thư mục global/current.
+
+
+## FL bước 10: đánh giá global trên test A/B/C và so với local
+
+Đây là job đánh giá offline tách khỏi FL ClientApp. Chạy sau khi đã chốt checkpoint bằng validation, không dùng test để chọn lại round hoặc threshold:
+
+```powershell
+python -B .\scripts\evaluate_fl_test.py
+```
+
+Lệnh đóng băng hash config/manifest/test/model trong plan trước khi chấm. Mỗi node có một container networknone, chỉ đọc test.csv và manifest của chính node, global đã chốt cùng baseline local tương ứng. Train/validation và dữ liệu node khác không được mount. Script không yêu cầu các dịch vụ FL đang chạy, không gửi Flower run, không fit hoặc sửa model. Ngưỡng0,5 lấy từ hai bộ model cố định.
+
+`fl/evaluate_test.py` dùng portable inference và các hàm metric chung; `fl/check_test_evaluation.py` kiểm bằng4mẫu giả với confusion tính tay, cấm fit và truy cập train/validation/node khác, từ chối sai hash/threshold/checkpoint/path. `scripts/evaluate_fl_test.py` điều phối trên host, kiểm lại mọi metric phân loại bằng cách đếm độc lập từ predictions.csv rồi mới publish thư mục báo cáo. Các file dùng chung, không thêm bản riêng cho từng node.
+
+Output mặc định:
+
+```text
+reports/fl/test-evaluation/
+├── plan.json
+├── summary.json
+├── REPORT.md
+├── comparison.csv
+├── node-a/{metrics.json,predictions.csv}
+├── node-b/{metrics.json,predictions.csv}
+└── node-c/{metrics.json,predictions.csv}
+```
+
+Nếu output đã tồn tại, script giữ kết quả cũ. Kiểm lại model/input/report và confusion/metric từ các dự đoán đã lưu bằng:
+
+```powershell
+python -B .\scripts\evaluate_fl_test.py --verify
+```
+
+Cần `PASS frozen test evaluation artifacts`. Lệnh verify không chấm lại hoặc train. Có thể chỉ định --output tới một thư mục mới dưới reports/fl khi chủ động thực hiện đánh giá khác; không sửa checkpoint sau khi xem test rồi gọi đó là đánh giá test độc lập. Artifacts test nằm trong reports, bộ model và báo cáo training giữ nguyên. `test_evaluated:false` trong metrics của model mô tả giai đoạn train; job riêng này ghi `test_evaluated:true` trong summary.json.
+
+Ngày11/11/2026 đã chấm104742dòng test: A67226 (66772attack/454benign), B4317 (4152attack/165benign), C33199 (33081attack/118benign). Global chốt vòng4 của run6618119074863593551, weights SHA256 `40852d1ec9497aa9bd6849eecb91ecb04f863ec2264c13203d2db7976fde62c7`.
+
+| Node | Model | Precision attack | Recall attack | F1 attack | Balanced accuracy | FPR |
+|---|---|---:|---:|---:|---:|---:|
+| A | Global | 99,99% | 99,99% | 99,99% | 99,33% | 1,32% |
+| A | Local | 100,00% | 99,99% | 100,00% | 100,00% | 0,00% |
+| B | Global | 99,94% | 41,57% | 58,72% | 70,48% | 0,61% |
+| B | Local | 99,95% | 99,23% | 99,59% | 99,01% | 1,21% |
+| C | Global | 99,91% | 83,97% | 91,25% | 81,39% | 21,19% |
+| C | Local | 99,98% | 99,96% | 99,97% | 96,59% | 6,78% |
+
+Số phần trăm làm tròn2chữ số; xem confusion/raw metrics để tránh hiểu100,00% là không có lỗi. Confusion matrix theo thứ tự `[[TN, FP], [FN, TP]]`:
+
+| Node | Global | Local |
+|---|---|---|
+| A | [[448,6],[6,66766]] | [[454,0],[6,66766]] |
+| B | [[164,1],[2426,1726]] | [[163,2],[32,4120]] |
+| C | [[93,25],[5302,27779]] | [[110,8],[14,33067]] |
+
+Mean balanced accuracy theo node của global là83,74%, bộ3local là98,53%. Pooled global BA94,11%, recall92,56% không thay thế các số theo node: A có nhiều mẫu hơn và làm số pooled cao. Aggregate local chỉ gộp prediction của ba model local trên node của mình, không phải một model local chung.
+
+Đánh giá đã hoàn tất, nhưng chưa thể coi global đạt chất lượng triển khai: B bỏ sót2426attack; C bỏ sót5302attack và báo nhầm25/118benign. Không tự tune từ kết quả này. Local/global có lượng huấn luyện khác nhau nên đây là đối chiếu trên cùng test, chưa cô lập hiệu quả FL. Các test vẫn thuộc recording pilot hiện có; A/C đã được xem trước đó khi phát triển local, không phải recording/ngày độc lập.
+
+Bằng chứng tại thư mục output, gồm REPORT.md dễ đọc, comparison.csv để tổng hợp và predictions.csv có row_uid/nhãn thật/xác suất/dự đoán cả hai model. Audit máy hiện tại thêm audit.json: toàn bộ global/local files, config/manifest/test hash và13container giữ nguyên;4service FL healthy. Bước này hoàn thành đánh giá test offline, chưa chuyển global vào inference live.

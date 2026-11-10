@@ -1,0 +1,36 @@
+[project]
+name = "ddos-fl-laptop"
+version = "0.1.0"
+description = "Local three-node Suricata MLP federation with strict FedAvg"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "flwr==1.43.0",
+  "numpy==2.4.3",
+  "scikit-learn==1.8.0",
+  "scipy==1.18.1",
+]
+
+[tool.flwr.app]
+publisher = "local-lab"
+fab-format-version = 0
+fab-include = [
+  "fl/__init__.py",
+  "fl/server_app.py",
+  "fl/client_app.py",
+  "fl/local_data.py",
+  "fl/mlp_adapter.py",
+  "scripts/flow_features.py",
+  "scripts/model_runtime.py",
+  "scripts/train_mlp.py",
+  "scripts/check_fl_inputs.py",
+  "config/fl/fedavg.json",
+]
+
+[tool.flwr.app.components]
+serverapp = "fl.server_app:app"
+clientapp = "fl.client_app:app"
+
+[tool.flwr.app.config]
+project-root = "/workspace"
+num-rounds = 1
+timeout-seconds = 300

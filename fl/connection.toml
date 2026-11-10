@@ -1,0 +1,3 @@
+[superlink.docker]
+address = "fl-server:8000"
+insecure = true

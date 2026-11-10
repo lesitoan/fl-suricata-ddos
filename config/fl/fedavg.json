@@ -1,0 +1,75 @@
+{
+  "experiment_id": "laptop-fedavg-mlp",
+  "framework": "flower",
+  "algorithm": "FedAvg",
+  "model": {
+    "schema_version": "flow-v2",
+    "transform": "flow-v2-fixed-log-v1",
+    "features": ["protocol", "duration_s", "pkts_toserver", "pkts_toclient", "bytes_toserver", "bytes_toclient", "mean_packet_bytes", "response_packet_ratio", "duration_le_1us"],
+    "input_width": 13,
+    "hidden_layer_sizes": [32, 16],
+    "output_width": 1,
+    "activation": "relu",
+    "output_activation": "sigmoid",
+    "dtype": "float64",
+    "threshold": 0.5,
+    "labels": {"benign": 0, "attack": 1}
+  },
+  "training": {
+    "seed": 20261018,
+    "initialization": "fresh_shared_weights",
+    "rounds": 50,
+    "smoke_rounds": 1,
+    "pilot_rounds": 5,
+    "local_epochs": 1,
+    "solver": "adam",
+    "learning_rate_init": 0.001,
+    "alpha": 0.0001,
+    "batch_size": 256,
+    "optimizer_state": "reset_each_round",
+    "required_client_ids": ["A", "B", "C"],
+    "require_all_clients": true,
+    "aggregation_weight": "num_train_rows",
+    "checkpoint_selection": "mean_node_validation_balanced_accuracy",
+    "checkpoint_tie_break": "earliest_round",
+    "test_during_training": false
+  },
+  "deployment": {
+    "compose_project": "ddos-fl-laptop",
+    "profile": "fl",
+    "network_name": "ddos-fl-laptop_federation",
+    "network_internal": true,
+    "server_compose_file": "compose.fl.yaml",
+    "server_service": "fl-server"
+  },
+  "clients": {
+    "A": {
+      "compose_file": "compose.node-a.yaml",
+      "service": "fl-client-a",
+      "manifest_path": "data/node-a/work/splits/pilot-v1/manifest.json",
+      "manifest_sha256": "6063b60c3b34776fb4ca9125b4f8aa6dbb0507af8f9ddf8d69ddbcd0eb59c9e8",
+      "baseline_model_dir": "models/node-a/local-only-pilot-v1/laptop-01",
+      "baseline_weights_sha256": "ac2ff6e5eb49b3222c8d58ca59c8518e8085268c47c2ea8d5a9d3dcf85f0f901",
+      "sample_weighting": "class_balanced"
+    },
+    "B": {
+      "compose_file": "compose.node-b.yaml",
+      "service": "fl-client-b",
+      "manifest_path": "data/node-b/work/splits/pilot-v1/manifest.json",
+      "manifest_sha256": "bb282a4b2a8bc291472fa23891566a14545a8b7b196ff6cc75556c5caff9b390",
+      "baseline_model_dir": "models/node-b/current",
+      "baseline_weights_sha256": "9669b3d69117c3dfa27f6b0fbd88dadda0549f3e85bb4d29198e2b5fd7bbdcd2",
+      "sample_weighting": "class_and_attack_response"
+    },
+    "C": {
+      "compose_file": "compose.node-c.yaml",
+      "service": "fl-client-c",
+      "manifest_path": "data/node-c/work/splits/pilot-v1/manifest.json",
+      "manifest_sha256": "5ef6372f3a2947fa8cfe65f36755428e1d14352ae5d822f7046482f9b2b41f2e",
+      "baseline_model_dir": "models/node-c/current",
+      "baseline_weights_sha256": "7b42369f40cd01de5ae55a898f62be3398705548780f5bb26210e3178623f4a9",
+      "sample_weighting": "class_balanced"
+    }
+  },
+  "global_model_output": "models/fl/current"
+}

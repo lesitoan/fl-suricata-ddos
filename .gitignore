@@ -58,3 +58,6 @@ desktop.ini
 # Local project notes and internal documentation
 /TASK_LOG.md
 /docs/
+
+# Generated Flower App Bundles
+*.fab

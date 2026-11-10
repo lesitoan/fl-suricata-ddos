@@ -32,3 +32,69 @@ services:
   trainer:
     <<: *worker
     command: [python3, -B, scripts/node-a/train_node_a_pilot.py, --help]
+
+  fl-client-a:
+    image: ddos-fl-laptop-fl:step1
+    profiles: [fl]
+    command:
+      - flower-supernode
+      - --insecure
+      - --superlink
+      - fl-server:8000
+      - --node-config
+      - 'node-id="A" project-root="/workspace"'
+      - --isolation
+      - subprocess
+    environment:
+      FLWR_HOME: /var/lib/flwr
+    init: true
+    networks: [federation]
+    volumes:
+      - type: bind
+        source: ./config/fl
+        target: /workspace/config/fl
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-a/work/splits/pilot-v1/train.csv
+        target: /workspace/data/node-a/work/splits/pilot-v1/train.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-a/work/splits/pilot-v1/validation.csv
+        target: /workspace/data/node-a/work/splits/pilot-v1/validation.csv
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./data/node-a/work/splits/pilot-v1/manifest.json
+        target: /workspace/data/node-a/work/splits/pilot-v1/manifest.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./runtime/fl/client-a
+        target: /var/lib/flwr
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 0.75
+    pids_limit: 256
+    stop_grace_period: 30s
+    restart: "no"
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; s=socket.create_connection(('127.0.0.1',9094),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  federation:
+    name: ddos-fl-laptop_federation
+    external: true

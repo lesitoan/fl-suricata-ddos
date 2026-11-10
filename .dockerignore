@@ -21,3 +21,6 @@ __pycache__
 .vscode
 .idea
 docs
+
+# Generated Flower App Bundles
+*.fab

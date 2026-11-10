@@ -1,0 +1,64 @@
+name: ddos-fl-laptop
+
+services:
+  fl-server:
+    image: ddos-fl-laptop-fl:step1
+    profiles: [fl]
+    command:
+      - flower-superlink
+      - --insecure
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --isolation
+      - subprocess
+      - --database
+      - /var/lib/flwr/server.sqlite
+      - --disable-runtime-dependency-installation
+    environment:
+      FLWR_HOME: /var/lib/flwr
+    init: true
+    networks: [federation]
+    volumes:
+      - type: bind
+        source: ./config/fl
+        target: /workspace/config/fl
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./runtime/fl/server
+        target: /var/lib/flwr
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./models/fl
+        target: /workspace/models/fl
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./reports/fl
+        target: /workspace/reports/fl
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 0.75
+    pids_limit: 256
+    stop_grace_period: 30s
+    restart: "no"
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  federation:
+    name: ddos-fl-laptop_federation
+    internal: true
