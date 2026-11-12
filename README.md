@@ -543,9 +543,9 @@ docker compose -p ddos-fl-laptop -f compose.node-b-live.yaml up -d --force-recre
 UDP B và sensor B cần đang chạy khi dùng lệnh `--no-deps`. Không cần train lại hoặc đổi threshold để chạy smoke; ghi nhận đúng prediction quan sát được.
 
 
-### Node B: UDP burst probe có giới hạn
+### Node B: UDP load có giới hạn và đo trước/trong/sau
 
-Bài này gửi 100 UDP datagram 64 byte, tối đa khoảng 20 gói/giây trong khoảng 5 giây, bằng một socket tới cố định `udp-b:9000` trên mạng internal `site-b`. Đây là synthetic burst nhỏ để kiểm tra pipeline/phân loại; chưa phải ground truth CIC-DDoS2019 hoặc phép đo DDoS gây quá tải. Dịch vụ echo vẫn phản hồi bình thường. Không thay model hoặc threshold để ép kết quả attack.
+Bài hiện tại gửi tối đa 1000 UDP datagram 64 byte qua 5 socket/cổng nguồn, mục tiêu 500 gói/giây, tới cố định `udp-b:9000` trên mạng internal `site-b`. Nhịp gửi độc lập nhận echo, trong cửa sổ 2 giây, tối đa một gói mỗi slot lịch 2ms; slot bị trễ bị bỏ qua, không gửi bù sau cửa sổ. Nếu máy chậm không đạt đủ 1000 gói, sender giữ số thực tế/missed_send_slots và báo chưa hoàn tất. Có thêm 15 request benign đo RTT/timeout (5 trước, 5 trong, 5 sau), không tính vào 1000 gói tải. Đây là synthetic UDP load để đo hành vi và kiểm tích hợp; chưa phải ground truth DrDoS_UDP/CIC-DDoS2019 hoặc bằng chứng saturation. Dịch vụ echo và model/threshold giữ nguyên. MLP hiện chấm từng flow, không quan sát trực tiếp tổng pps của cả 5 cổng; tăng tải tổng không bảo đảm nhãn attack.
 
 Đảm bảo UDP B/sensor chạy và tạo lại riêng inference để nạp model current mới nhất, bỏ qua EVE cũ:
 
@@ -578,9 +578,9 @@ docker run --rm `
 python -B .\scripts\node-b\verify_udp_probe.py --run-dir $runDir
 ```
 
-Verifier đợi tối đa 75 giây để flow hết timeout và prediction xuất hiện. Một socket thường tạo một aggregated flow/prediction, không phải 100 prediction. Đọc `packets_sent`, số gói Suricata bắt được, `sent_packet_count_matches_capture`, `probability_attack`, `threshold`, `prediction` trong `verification.json`. `MATCHED` nghĩa là đã ghép được pipeline, không tự khẳng định phát hiện DDoS thành công. Nếu prediction là benign, ghi nhận model không đánh dấu burst này là attack; không coi nhãn synthetic là bằng chứng attack thực tế.
+Verifier đợi tối đa 75 giây để flow hết timeout và prediction xuất hiện. Phiên bản UDP load hiện tại gửi tối đa 1000 gói qua 5 cổng, mục tiêu 500pps, thường tạo 5 flow/prediction; có thêm 15 request benign đo trước/trong/sau qua các cổng riêng, không gộp vào flow tải. Lịch gửi không chờ echo từng gói. Cửa sổ gửi 2 giây, toàn thí nghiệm tối đa 15 giây (gồm các phép đo benign và chờ echo); không gửi bù dồn nếu lịch CPU trễ. Có thể dùng --mode global với verifier sau khi đã nạp global; mặc định local. Verifier vẫn đọc được báo cáo burst cũ 100 gói/một cổng. Đọc packets_sent, số gói Suricata bắt được, sent_packet_count_matches_capture, predicted_attack/predicted_benign và health_checks trong verification.json; xác suất từng flow nằm trong predictions.json. Các trường probability_attack/prediction cấp báo cáo chỉ có khi đúng một prediction để tương thích báo cáo cũ. `MATCHED` nghĩa là đã ghép được pipeline, không tự khẳng định phát hiện DDoS thành công. Nếu prediction là benign, ghi nhận model không đánh dấu burst này là attack; không coi nhãn synthetic là bằng chứng attack thực tế.
 
-`sender.json` ghi số gói/time/port; `flow.json`, `prediction.json`, `verification.json` lưu đối chiếu. Suricata không bắt buộc có event `alert`; ML dùng event `flow`. Script có count/nhịp/deadline cố định, không có tùy chọn đích bên ngoài.
+`sender.json` ghi số gói/time/các cổng, tốc độ thực tế và health_checks (5 request trước/trong/sau, RTT/timeout). `flows.json`, `predictions.json`, `verification.json` lưu đối chiếu; báo cáo cũ một flow vẫn có thêm flow.json/prediction.json. Dashboard hiển thị thẻ số đo B riêng cho local/global, kiểm số gói từng cổng và stats capture drops/errors nếu có snapshot phù hợp. Không coi echo thiếu là bằng chứng vị trí mất gói hoặc RTT thay đổi là saturation. Dịch vụ vẫn echo bình thường; không đổi model/ngưỡng để ép dự đoán attack. Suricata không bắt buộc có event `alert`; ML dùng event `flow`. Script có count/nhịp/deadline cố định, không có tùy chọn đích bên ngoài.
 
 
 ### Node B: đối chiếu PCAP UDP có nhãn chưa dùng trong pilot
@@ -1222,3 +1222,56 @@ docker compose -p ddos-fl-laptop -f compose.node-c-live.yaml -f compose.node-c-g
 Hai override mount `models/fl/current` ở chế độ chỉ đọc và ghi prediction vào thư mục của từng node. Đọc log inference để kiểm tra hash checkpoint sau khi khởi động. Chạy `benign_traffic.py` của từng node trong container trên mạng site nội bộ tương ứng rồi đối chiếu request, flow EVE và prediction theo cổng nguồn, thời gian, chữ ký sự kiện và hash model.
 
 Node B trả đủ 10 UDP echo và node C trả đủ 10 truy vấn LDAP rootDSE qua UDP. Global vòng 4 chấm cả 20 flow là `benign`. Khoảng từ lúc flow kết thúc tới lúc ghi prediction là 31,33–40,72 giây tại B và 31,52–40,04 giây tại C trong lần kiểm này. Báo cáo nằm tại `reports/node-b/global-live-benign-check.json` và `reports/node-c/global-live-benign-check.json`.
+
+
+### Node C: LDAP burst giới hạn cho demo local/global
+
+`scripts/node-c/ldap_probe.py` phát traffic thật tới hostname cố định `ldap-c`, UDP/389, trên mạng Docker `ddos-fl-laptop_site-c`. Script dùng codec LDAP chung, gửi tối đa 100 truy vấn rootDSE qua một socket, tối đa 20 gói/giây và có ngân sách gửi 10 giây. Nó kiểm tra message ID, BER/result code và thuộc tính phản hồi. Trước khi gửi, đích phải là host riêng khác trong subnet của `eth0`; script không có tham số đổi đích, số gói hoặc tốc độ.
+
+Đây là kịch bản `bounded_ldap_burst` dùng ở lượt attack demo, chưa phải mẫu DrDoS_LDAP đã xác thực. Script không giả mạo IP hay thực hiện reflection, và không tự đặt nhãn ground truth là attack. Burst dùng cùng truy vấn hợp lệ như benign, nhưng tăng số lượng/nhịp và gom vào một socket. Dự đoán có thể là benign; không dùng kết quả này để tính recall tấn công dataset hoặc khẳng định gây quá tải. Model nhận các đặc trưng flow, không đọc trực tiếp payload LDAP.
+
+Chỉ chạy lệnh dưới khi đã chủ động bật `ldap-c`, `sensor-c` và `inference-c` với model muốn demo, kiểm inference báo ready và đúng hash. Việc đặt `$mode` chỉ đặt tên thư mục báo cáo, không chuyển model. Không cần build lại image hoặc train lại. Chạy tại root dự án:
+
+```powershell
+$projectRoot = (Get-Location).Path
+$mode = 'local' # Đổi thành global sau khi đã chọn Compose override global.
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$runDir = Join-Path $projectRoot "reports\node-c\ldap-probe-$mode-$stamp"
+if (Test-Path -LiteralPath $runDir) { throw 'Report folder already exists' }
+New-Item -ItemType Directory -Path $runDir | Out-Null
+
+docker run --rm `
+  --network ddos-fl-laptop_site-c --memory 64m --cpus 0.25 `
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges `
+  --mount "type=bind,source=$projectRoot\scripts,target=/app,readonly" `
+  --mount "type=bind,source=$runDir,target=/report" `
+  ddos-fl-laptop-node-a-sensor:step1 `
+  python3 -B /app/node-c/ldap_probe.py
+
+if ($LASTEXITCODE -ne 0) { throw "Probe failed; inspect $runDir\sender.json" }
+```
+
+`sender.json` được tạo độc quyền, không ghi đè kết quả cũ. Kết quả mong đợi phía sender là `completed:true`, `packets_sent:100`, `valid_responses:100`, `errors:[]`. Các trường này xác minh gửi/nhận LDAP, chưa xác minh Suricata hoặc model. Báo cáo lưu IP/cổng nguồn, IP/cổng đích, thời gian và từng message ID để ghép với EVE. Lỗi gửi/nhận làm lệnh thoát khác 0 và vẫn giữ báo cáo đã thu được.
+
+Chờ khoảng 30–45 giây hoặc lâu hơn nếu hệ thống bận để Suricata xuất flow UDP. Dùng IP/cổng và khoảng thời gian trong sender để tìm event flow mới ở `data/node-c/live/eve/eve.json`. Một socket thường tạo một flow gộp, không phải 100 prediction. Ghép flow với prediction qua chữ ký sự kiện và kiểm hash model. Prediction local nằm ở `data/node-c/live/predictions/predictions.jsonl`, global ở `data/node-c/live/predictions-global/predictions.jsonl`. Không chỉ lấy dòng cuối vì EVE có thể chứa các lượt demo trước.
+
+Muốn lặp với model còn lại, chuyển inference bằng Compose như phần global, kiểm ready/hash, rồi chạy lại với `$mode` và thư mục report mới. Chưa có phép kiểm live được thực hiện khi bổ sung script; kiểm tra chuẩn bị chỉ dùng socket/clock/interface giả, không phát traffic hoặc thay model.
+
+
+## Dashboard điều khiển demo trên Windows
+
+Dashboard chạy bằng Python trực tiếp trên máy, không dùng Docker cho web UI và không cần pip/npm. Tại root dự án chạy:
+
+```powershell
+python -B .\dashboard\app.py --open
+```
+
+Mở `http://127.0.0.1:8765`, hoặc double-click `dashboard/start.bat`. Có thể đổi cổng bằng `--port 8766`. Cần Docker Desktop đang chạy và các model/dataset đã chuẩn bị trước. Dashboard chỉ kiểm trạng thái lúc mở, không tự bật node, gửi traffic hoặc train.
+
+UI có bật/tắt A/B/C, chọn và nạp Local/Global, gửi benign/probe giới hạn, bật/tắt bốn service FL, chọn số vòng và submit FL, log EVE/prediction/container cập nhật tự động, báo cáo live và tab test dataset đã lưu. Chọn Local/Global rồi bấm Bật/Nạp để áp dụng. Nút Chạy FL tạo run mới từ seed chung và có thể thay global/current sau thành công; inference cần nạp lại để dùng global mới. Không dừng FL trong lúc run còn hoạt động.
+
+Phiên mới/Xóa màn hình chỉ làm mới phần hiển thị, giữ evidence. Xóa log live yêu cầu node đã dừng và chỉ xóa nội dung các file log của node, không xóa reports/fl, dataset hoặc model. Báo cáo burst live không được coi là attack recall có ground truth. Artifacts dashboard nằm trong reports/dashboard và runtime/dashboard, đã thuộc vùng Git ignore hiện có.
+
+Xem [dashboard/README.md](dashboard/README.md) để biết cách dùng, giới hạn và lệnh kiểm tra bằng Docker/sender giả. Dừng dashboard bằng Ctrl+C không tự dừng lab.
+
+Mỗi node có nút **Test dataset · Local vs Global** để chấm cả hai model trên cùng toàn bộ tập test riêng của node, không cần bật node hoặc nạp model live. Kết quả xuất hiện ở **Test có nhãn**: metrics, confusion matrix, bảng prediction có bộ lọc FP/FN và tải CSV/JSON. Worker Docker tạm không có mạng, không train/chỉnh ngưỡng hoặc ghi EVE. Các lượt có report/hash riêng trong `reports/dashboard/sessions`; báo cáo A/B/C cũ vẫn có lựa chọn riêng. Không chạy FL đồng thời khi đánh giá dataset. Kết quả từ tập test pilot đã xem không thay thế kiểm chứng traffic live hoặc đánh giá trên ngày ghi hình độc lập.
