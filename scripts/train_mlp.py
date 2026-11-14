@@ -11,13 +11,14 @@ import shutil
 import tempfile
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import sklearn
 from sklearn.metrics import (balanced_accuracy_score, confusion_matrix,
-                             f1_score, precision_score, recall_score)
+                             f1_score, precision_score, recall_score, log_loss)
 from sklearn.neural_network import MLPClassifier
 
 # Use the same feature transform and portable predictor as live inference.
@@ -161,6 +162,53 @@ def model_output(destination):
         lock.rmdir()
 
 
+class TrainingLog:
+    """Best-effort epoch telemetry, independent of fitting and model publication."""
+    def __init__(self, root, node_id, config):
+        self.run_id = uuid.uuid4().hex
+        self.path = Path(root)/'reports'/('node-'+node_id.lower())/'training'/(self.run_id+'.json')
+        self.state = {'schema_version':'local-training-v1','node':node_id,'run_id':self.run_id,
+                      'started_at_utc':datetime.now(timezone.utc).isoformat(),
+                      'experiment_id':config['experiment_id'],'epochs_requested':config['epochs'],
+                      'status':'training','history':[], 'test_used_for_training_curves':False}
+        self.enabled = True
+
+    def save(self):
+        if not self.enabled:
+            return
+        temporary = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=self.path.parent,
+                                             prefix='.epoch-',suffix='.tmp',delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(self.state,stream,allow_nan=False)
+                stream.write('\n')
+            temporary.replace(self.path)
+        except (OSError, ValueError) as error:
+            self.enabled = False
+            print('Training telemetry unavailable: '+str(error),file=sys.stderr,flush=True)
+        finally:
+            if temporary is not None:
+                try: temporary.unlink(missing_ok=True)
+                except OSError: pass
+
+    def __enter__(self):
+        self.save()
+        return self
+
+    def record(self, history, best_epoch):
+        self.state.update(history=history, best_epoch=best_epoch)
+        self.save()
+
+    def __exit__(self, kind, error, traceback):
+        self.state.update(status='failed' if kind else 'epochs_complete',
+                          finished_at_utc=datetime.now(timezone.utc).isoformat())
+        if kind:
+            self.state['error'] = kind.__name__
+        self.save()
+
+
 def main(node_id, limitation, *, validation_only_default=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',type=Path,required=True)
@@ -196,13 +244,17 @@ def main(node_id, limitation, *, validation_only_default=False):
     best_score = -1
     best_epoch = None
     history = []
-    for epoch in range(1,cfg['epochs']+1):
-        model.partial_fit(xtrain,ytrain,classes=np.asarray([0,1]),sample_weight=sample_weights)
-        scores = metrics(yval,(model.predict_proba(xval)[:,1]>=cfg['threshold']).astype(int))
-        history.append({'epoch':epoch,'train_loss':float(model.loss_),'validation':scores})
-        if scores['balanced_accuracy'] > best_score:
-            best = copy.deepcopy(model); best_score=scores['balanced_accuracy']; best_epoch=epoch
-        print(json.dumps({'epoch':epoch,'validation_balanced_accuracy':scores['balanced_accuracy']}),flush=True)
+    with TrainingLog(root,node_id,cfg) as telemetry:
+        for epoch in range(1,cfg['epochs']+1):
+            model.partial_fit(xtrain,ytrain,classes=np.asarray([0,1]),sample_weight=sample_weights)
+            validation_probability = model.predict_proba(xval)[:,1]
+            scores = metrics(yval,(validation_probability>=cfg['threshold']).astype(int))
+            scores['loss'] = float(log_loss(yval,validation_probability,labels=[0,1]))
+            history.append({'epoch':epoch,'train_loss':float(model.loss_),'validation':scores})
+            if scores['balanced_accuracy'] > best_score:
+                best = copy.deepcopy(model); best_score=scores['balanced_accuracy']; best_epoch=epoch
+            telemetry.record(history,best_epoch)
+            print(json.dumps({'epoch':epoch,'validation_balanced_accuracy':scores['balanced_accuracy']}),flush=True)
     training_seconds = time.perf_counter()-start
     # The validation-only path never opens test CSV, even after selection.
     evaluation_name = 'validation' if args.validation_only else 'test'
@@ -237,7 +289,8 @@ def main(node_id, limitation, *, validation_only_default=False):
                   'sklearn':sklearn.__version__,'pip_freeze':subprocess.check_output(['python3','-m','pip','freeze'],text=True)},
                 'class_weights_from_train':weights.tolist() if weighting['mode']=='class_balanced' else None,
                 'sample_weighting':weighting,'best_epoch':best_epoch,'training_seconds':training_seconds,
-                'history':history,'validation_of_selected_checkpoint':history[best_epoch-1]['validation'],
+                'history':history,'telemetry_run_id':telemetry.run_id,
+                'validation_of_selected_checkpoint':history[best_epoch-1]['validation'],
                 'test':metrics(ytest,(probability>=cfg['threshold']).astype(int)),
                 'all_attack_dummy_test':metrics(ytest,np.ones_like(ytest)),
                 'portable_inference_max_abs_error':float(np.max(np.abs(probability-portable))),

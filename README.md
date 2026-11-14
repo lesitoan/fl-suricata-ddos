@@ -1260,6 +1260,8 @@ Muốn lặp với model còn lại, chuyển inference bằng Compose như ph�
 
 ## Dashboard điều khiển demo trên Windows
 
+Có thể xem thông số train bằng **TensorBoard trên Windows**, độc lập với Docker: cài một lần `powershell -ExecutionPolicy Bypass -File .\tools\tensorboard\setup.ps1`, rồi bấm **TensorBoard** trên dashboard để mở `http://127.0.0.1:6006`. Có lịch sử Local A/B/C theo epoch và FL theo vòng, loss/validation metrics/timing. Nhập lịch sử hiện tại không cần train lại; chỉ giữ lần Local mới nhất của từng node và lần FL mới nhất (tối đa 7 mục), các lần train sau thay biểu đồ cũ. Xem [tools/tensorboard/README.md](tools/tensorboard/README.md) về nguồn số liệu, cách đọc và giới hạn. Không cài TensorFlow hoặc đổi thuật toán/train image.
+
 Dashboard chạy bằng Python trực tiếp trên máy, không dùng Docker cho web UI và không cần pip/npm. Tại root dự án chạy:
 
 ```powershell
@@ -1275,3 +1277,5 @@ Phiên mới/Xóa màn hình chỉ làm mới phần hiển thị, giữ evidenc
 Xem [dashboard/README.md](dashboard/README.md) để biết cách dùng, giới hạn và lệnh kiểm tra bằng Docker/sender giả. Dừng dashboard bằng Ctrl+C không tự dừng lab.
 
 Mỗi node có nút **Test dataset · Local vs Global** để chấm cả hai model trên cùng toàn bộ tập test riêng của node, không cần bật node hoặc nạp model live. Kết quả xuất hiện ở **Test có nhãn**: metrics, confusion matrix, bảng prediction có bộ lọc FP/FN và tải CSV/JSON. Worker Docker tạm không có mạng, không train/chỉnh ngưỡng hoặc ghi EVE. Các lượt có report/hash riêng trong `reports/dashboard/sessions`; báo cáo A/B/C cũ vẫn có lựa chọn riêng. Không chạy FL đồng thời khi đánh giá dataset. Kết quả từ tập test pilot đã xem không thay thế kiểm chứng traffic live hoặc đánh giá trên ngày ghi hình độc lập.
+
+Hai nút **Attack từ …** trên mỗi node kiểm thử chéo. Ví dụ **Attack từ B** trên thẻ A dùng các dòng có nhãn `attack` trong `test.csv` của B để so sánh Local A với Global hiện tại. Tab **Test có nhãn** hiện số phát hiện, bỏ sót và recall của hai model. Chạy offline, không cần bật các node.

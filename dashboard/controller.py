@@ -12,7 +12,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from dataset_eval import evaluate as evaluate_dataset, predictions_page, sha as dataset_sha
+from dataset_eval import evaluate as evaluate_dataset, evaluate_cross, predictions_page, sha as dataset_sha
+from tensorboard_service import start as start_tensorboard
 
 PROJECT = 'ddos-fl-laptop'
 IMAGE = 'ddos-fl-laptop-node-a-sensor:step1'
@@ -52,9 +53,23 @@ def json_file(path, default=None):
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2,
-                                    allow_nan=False) + '\n', encoding='utf-8')
-    temporary.replace(path)
+    try:
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2,
+                                        allow_nan=False) + '\n', encoding='utf-8')
+        for attempt in range(5):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                # A Windows reader can briefly hold the destination open.
+                time.sleep(.05 * (attempt + 1))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def tail_text(path, lines=160, max_bytes=300_000):
@@ -333,7 +348,8 @@ class Controller:
 
     def dataset_busy(self):
         return (self.safe('runtime/dashboard/.dataset-evaluation-lock').exists()
-                or any(job['action']=='dataset.test' and job['status'] in ACTIVE for job in self.jobs))
+                or any(job['action'] in ('dataset.test', 'dataset.cross_attack')
+                       and job['status'] in ACTIVE for job in self.jobs))
 
     def node_state(self, node):
         services = {name: self.docker['services'].get(name, {'running': False, 'status': 'missing'})
@@ -395,12 +411,18 @@ class Controller:
         allowed = {'node.start': {'node', 'mode'}, 'node.stop': {'node'},
                    'node.mode': {'node', 'mode'}, 'traffic': {'node', 'scenario'},
                    'logs.clear': {'node'}, 'fl.start': set(), 'fl.stop': set(),
-                   'fl.run': {'rounds'}, 'session.new': set(), 'dataset.test':{'node'}}
+                   'fl.run': {'rounds'}, 'session.new': set(), 'dataset.test':{'node'},
+                   'dataset.cross_attack': {'node', 'source_node'}, 'tensorboard.start':set()}
         if not isinstance(action, str) or action not in allowed or set(payload) != allowed[action] | {'action'}:
             raise LabError('Thao tác hoặc tham số không hợp lệ')
         node = payload.get('node')
         if 'node' in allowed[action] and (not isinstance(node, str) or node not in NODES):
             raise LabError('Node phải là a, b hoặc c')
+        source = payload.get('source_node')
+        if action == 'dataset.cross_attack' and (
+                not isinstance(source, str) or source not in NODES or source == node):
+            raise LabError('Chọn một node nguồn khác node được kiểm thử')
+        dataset_action = action in ('dataset.test', 'dataset.cross_attack')
         if 'mode' in allowed[action] and payload['mode'] not in ('local', 'global'):
             raise LabError('Model phải là local hoặc global')
         if action == 'traffic' and payload['scenario'] not in ('benign', 'attack'):
@@ -412,15 +434,17 @@ class Controller:
         with self.lock:
             active = [job for job in self.jobs if job['status'] in ACTIVE]
             resources = {'node:'+node} if node else {'fl'}
-            if action in ('dataset.test','fl.run'):
+            if action=='tensorboard.start':
+                resources = {'tensorboard'}
+            if dataset_action or action == 'fl.run':
                 resources.add('dataset')
             if action == 'session.new':
-                resources = {'fl', 'node:a', 'node:b', 'node:c'}
+                resources = {'fl', 'node:a', 'node:b', 'node:c', 'tensorboard'}
             if any(resources & set(job['resources']) for job in active):
                 raise LabError('Thao tác trước vẫn đang chạy trên thành phần này')
             if action in ('fl.start', 'fl.stop', 'fl.run') and self.fl_busy():
                 raise LabError('FL đang chạy hoặc giữ lock; không dừng/gửi thêm run')
-            if action=='dataset.test' and (self.fl_busy() or self.dataset_busy()):
+            if dataset_action and (self.fl_busy() or self.dataset_busy()):
                 raise LabError('Đợi FL hoặc lượt test dataset hiện tại hoàn tất trước')
             if action=='fl.run' and self.dataset_busy():
                 raise LabError('Đợi test dataset hoàn tất trước khi chạy FL')
@@ -441,12 +465,14 @@ class Controller:
             job = {'id': identifier, 'action': action, 'node': node,
                    'status': 'queued', 'created_at': utc(), 'folder': folder,
                    'resources': sorted(resources), 'request': payload}
+            if action == 'dataset.cross_attack':
+                job['source_node'] = source
             if node and 'mode' in payload:
                 job['mode'] = payload['mode']
             if node and action == 'traffic':
                 job['mode'] = self.node_state(node)['mode']
-            self.jobs.append(job)
             self.update(job)
+            self.jobs.append(job)
             threading.Thread(target=self._work, args=(job,), daemon=True).start()
             return {'job': identifier}
 
@@ -467,10 +493,11 @@ class Controller:
         raise LabError('Inference chưa ready/đúng hash. Xem log container hoặc bấm Nạp model.')
 
     def _work(self, job):
-        self.update(job, status='running', message='Đang thực hiện…')
         try:
-            self._require_docker()
+            self.update(job, status='running', message='Đang thực hiện…')
             payload, node, action = job['request'], job['node'], job['action']
+            if action!='tensorboard.start':
+                self._require_docker()
             if action in ('fl.start', 'fl.stop') and self.fl_busy():
                 raise LabError('FL giữ lock; không thay đổi dịch vụ lúc này')
             if action in ('node.start', 'node.mode'):
@@ -523,12 +550,18 @@ class Controller:
                 self._train(job, payload['rounds'])
             elif action == 'traffic':
                 self._traffic(job, node, payload['scenario'])
-            elif action == 'dataset.test':
+            elif action == 'tensorboard.start':
+                self.update(job,url=start_tensorboard(self.root))
+            elif action in ('dataset.test', 'dataset.cross_attack'):
                 if self.fl_busy():
                     raise LabError('Đợi FL hoàn tất trước khi test dataset')
-                summary=evaluate_dataset(self.root,node,self.safe(job['folder']),
-                    lambda args:self._exec(args,timeout=240,job=job),
-                    lambda message:self.update(job,message=message))
+                job_folder = self.safe(job['folder'])
+                execute = lambda args: self._exec(args, timeout=240, job=job)
+                progress = lambda message: self.update(job, message=message)
+                if action == 'dataset.cross_attack':
+                    summary = evaluate_cross(self.root, node, payload['source_node'], job_folder, execute, progress)
+                else:
+                    summary = evaluate_dataset(self.root, node, job_folder, execute, progress)
                 self.update(job,dataset_summary=summary)
             elif action == 'logs.clear':
                 writers = NODES[node][1:]
@@ -553,9 +586,16 @@ class Controller:
             self.refresh_docker()
             self.update(job, status='complete', message='Hoàn tất', finished_at=utc())
         except Exception as error:
-            self._job_log(job, type(error).__name__+': '+str(error))
-            self.update(job, status='failed', error=str(error)[-8000:],
-                        message='Thất bại — xem chi tiết', finished_at=utc())
+            try:
+                self._job_log(job, type(error).__name__+': '+str(error))
+            except OSError:
+                pass
+            try:
+                self.update(job, status='failed', error=str(error)[-8000:],
+                            message='Thất bại — xem chi tiết', finished_at=utc())
+            except OSError:
+                # update has already published the failure in memory.
+                pass
 
     def _train(self, job, rounds):
         for name in ('fl-server', 'fl-client-a', 'fl-client-b', 'fl-client-c'):
@@ -725,18 +765,21 @@ class Controller:
     def dataset_artifact(self, identifier):
         with self.lock:
             job=next((item for item in self.jobs if item['id']==identifier),None)
-            if not job or job['action']!='dataset.test' or job['status']!='complete' or job.get('node') not in NODES:
+            if (not job or job['action'] not in ('dataset.test', 'dataset.cross_attack')
+                    or job['status'] != 'complete' or job.get('node') not in NODES):
                 raise LabError('Chưa có báo cáo dataset hoàn tất cho job này')
             folder=self.safe(job['folder'])/'dataset'
             if not folder.resolve().is_relative_to(self.session_dir().resolve()):
                 raise LabError('Report nằm ngoài phiên hiện tại')
-            path=folder/('node-'+job['node'])/'predictions.csv'
+            relative = 'predictions.csv' if job['action'] == 'dataset.cross_attack' else (
+                'node-'+job['node']+'/predictions.csv')
+            path = folder/relative
             if not path.resolve().is_relative_to(folder.resolve()):
                 raise LabError('Không đọc prediction thông qua đường dẫn ngoài report')
             summary=json_file(folder/'summary.json',{})
             if summary!=job.get('dataset_summary'):
                 raise LabError('Báo cáo dataset đã thay đổi sau khi xác minh')
-            expected=summary.get('artifacts',{}).get('node-'+job['node']+'/predictions.csv')
+            expected = summary.get('artifacts', {}).get(relative)
             if not expected or dataset_sha(path)!=expected:
                 raise LabError('Hash predictions.csv không còn khớp báo cáo')
             return path,summary

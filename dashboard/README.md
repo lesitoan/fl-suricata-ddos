@@ -12,6 +12,8 @@ Mở `http://127.0.0.1:8765`. Có thể double-click `dashboard/start.bat`. Nế
 
 ## Điều khiển
 
+- **TensorBoard**: mở viewer host tại `http://127.0.0.1:6006`, xem train Local theo epoch và FL A/B/C/server theo vòng. Cài một lần bằng `powershell -ExecutionPolicy Bypass -File .\tools\tensorboard\setup.ps1`. Nút không train hoặc yêu cầu node/Docker đang bật. Chỉ giữ lần chạy mới nhất của từng Local A/B/C và lần FL mới nhất, tối đa 7 mục cố định. Train lại thay đường cũ, vẫn giữ đủ các epoch/vòng của lần mới. Xem `tools/tensorboard/README.md` để chọn Runs, hiểu loss/validation và dừng viewer. Viewer chạy nền độc lập với dashboard.
+
 - **Local / Global**: chọn model muốn dùng, sau đó bấm **Bật node** nếu node đang tắt hoặc **Nạp local/global** nếu node đang chạy. Chọn nút radio chưa áp dụng model ngay. Nạp model chỉ tạo lại inference của node, không restart service/sensor. UI hiện mode/hash thực tế từ mount và log của container, chỉ mở nút traffic khi model khớp và các service sẵn sàng.
 - **Tắt**: dừng inference, sensor và dịch vụ của đúng node; không tác động FL client. Không dùng Compose down/remove-orphans hoặc thay container của dự án cũ.
 - **Benign / SYN probe / UDP load / LDAP burst**: chạy script hiện có trong container sender tạm, mạng internal của đúng node. Giới hạn A 50 SYN/10pps, B 1000 UDP/500pps qua 5 cổng tải, C 100 LDAP/20pps. B phát trong cửa sổ 2 giây, tối đa một gói mỗi slot lịch 2ms, toàn thí nghiệm 15 giây; không gửi bù các slot bị lỡ khi máy chậm, không kéo dài pha tải sau 2 giây. Nếu không gửi đủ 1000 gói, sender ghi missed_send_slots và trạng thái chưa hoàn tất; số gói/tốc độ thực tế được giữ nguyên trong report. B còn 15 request benign kiểm tra riêng (5 trước/trong/sau), không nằm trong 1000 gói tải. Không có trường nhập target/count/rate tùy ý. Thao tác cùng node bị khóa tới khi ghép báo cáo; có thể chạy các node khác nhau song song.
@@ -21,6 +23,14 @@ Mở `http://127.0.0.1:8765`. Có thể double-click `dashboard/start.bat`. Nế
 - **Xuất phiên**: tải JSON gồm các thao tác và kết quả hiện tại.
 
 ## Log và báo cáo
+
+### Test chéo attack từ node khác
+
+Hai nút **Attack từ …** trên mỗi thẻ dùng toàn bộ dòng nhãn `attack` trong `test.csv` của node nguồn. Ví dụ, **Attack từ B** ở thẻ A chấm các flow attack đã lưu của B bằng **Local A** và **Global hiện tại**. Cần Docker Desktop, image `ddos-fl-laptop-fl:step1`, tập test nguồn và hai model. Có thể chạy khi dịch vụ A/B/C và FL đều tắt.
+
+Tab **Test có nhãn** ghi rõ hướng B → A, số mẫu, số phát hiện (TP), số bỏ sót (FN) và recall attack cho từng model. Bảng mẫu cho phép lọc FN và tải CSV/JSON. Đây là tập chỉ có attack nên không tính tỷ lệ báo nhầm trên benign. Global có thể đã học từ tập train của node nguồn trong các vòng FL.
+
+Worker chạy offline với `--network none`, chấm đặc trưng `flow-v2` đã xử lý, không phát gói hay ghi EVE. Node nguồn và model đích được kiểm hash trước/sau, kết quả được lưu riêng theo job.
 
 ### Test dataset: so sánh Local và Global
 

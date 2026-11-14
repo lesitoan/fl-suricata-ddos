@@ -35,6 +35,7 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - ./models/node-b:/workspace/models/node-b
+      - ./reports/node-b/training:/workspace/reports/node-b/training
     command: [python3, -B, scripts/node-b/train_node_b_pilot.py, --help]
 
   udp-evaluator:

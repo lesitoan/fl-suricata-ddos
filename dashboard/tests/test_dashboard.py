@@ -139,6 +139,37 @@ class DashboardTests(unittest.TestCase):
         self.controller.docker['services']['inference-c']['mode'] = None
         self.assertFalse(self.controller.node_state('c')['ready'])
 
+    def test_job_file_replace_retries_transient_permission_error(self):
+        path = self.root/'job.json'
+        write_json(path, {'status': 'queued'})
+        replace = Path.replace
+        attempts = []
+
+        def replace_after_reader_closes(source, target):
+            attempts.append(target)
+            if len(attempts) == 1:
+                raise PermissionError('Reader is holding job.json open')
+            return replace(source, target)
+
+        with patch.object(Path, 'replace', replace_after_reader_closes):
+            write_json(path, {'status': 'running'})
+
+        self.assertEqual(json.loads(path.read_text()), {'status': 'running'})
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(list(self.root.glob('job.json.*.tmp')))
+
+    def test_initial_job_status_write_failure_releases_active_job(self):
+        job = self.job('dataset.cross_attack', source_node='a')
+        self.controller.jobs.append(job)
+        self.fixture.calls.clear()
+        with patch('controller.write_json', side_effect=PermissionError('Unable to replace job.json')):
+            self.controller._work(job)
+
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('Unable to replace', job['error'])
+        self.assertFalse(self.controller.dataset_busy())
+        self.assertFalse(self.fixture.calls)
+
     def test_mode_switch_only_recreates_own_inference(self):
         job = self.job('node.mode', mode='global')
         self.controller._work(job)

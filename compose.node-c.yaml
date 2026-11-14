@@ -40,6 +40,7 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - ./models/node-c:/workspace/models/node-c
+      - ./reports/node-c/training:/workspace/reports/node-c/training
     command: [python3, -B, scripts/node-c/train_node_c_pilot.py, --help]
 
   fl-client-c:

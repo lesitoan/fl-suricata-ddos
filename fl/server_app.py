@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
@@ -313,6 +314,7 @@ def run_federation(grid,root,num_rounds=None,timeout=300):
     lock.mkdir()  # Fixed model/report paths permit only one run at a time.
     strategy = None
     state = {'status':'discovering','algorithm':'FedAvg','config_sha256':config_sha256,
+             'telemetry_run_id':uuid.uuid4().hex,
              'rounds_requested':rounds,'completed_rounds':0,'history':[],
              'test_evaluated':False,'convergence_assessed':False,
              'communication_scope':'Train/evaluate round messages: raw arrays and serialized Flower object trees. Excludes discovery, app bundles, HTTP/TLS/cache effects and actual network traffic'}

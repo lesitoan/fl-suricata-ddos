@@ -3,8 +3,12 @@ import csv
 import hashlib
 import json
 import math
+import os
+import stat
 import subprocess
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from itertools import zip_longest
 from pathlib import Path
@@ -14,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from check_fl_inputs import check_weights
 from evaluate_fl_test import verify_output
 from flow_features import FEATURES, SCHEMA
+from score_attack_test import attack_rows
 
 IMAGE = 'ddos-fl-laptop-fl:step1'
 MODEL_FILES = ('model.json', 'weights.npz', 'metrics.json')
@@ -56,13 +61,10 @@ def assert_fl_idle(root):
         require(not (root/'reports/fl'/name).exists(), 'FL đang chạy/submit; đợi trước khi test dataset')
 
 
-def freeze_node(root, node):
+def freeze_test(root, node, config):
     require(node in ('a', 'b', 'c'), 'Unsupported node')
-    assert_fl_idle(root)
     upper, own = node.upper(), 'data/node-'+node+'/work/splits/pilot-v1/'
-    config_path = root/'config/fl/fedavg.json'
-    config = read(config_path)
-    spec, contract = config['clients'][upper], config['model']
+    spec = config['clients'][upper]
     require(spec['manifest_path'] == own+'manifest.json', 'Foreign manifest path')
     manifest_path = inside(root, spec['manifest_path'], own)
     require(sha(manifest_path) == spec['manifest_sha256'], 'Manifest hash differs')
@@ -74,6 +76,18 @@ def freeze_node(root, node):
     require(artifact['path'] == own+'test.csv', 'Only own test.csv is allowed')
     test = inside(root, artifact['path'], own)
     require(sha(test) == artifact['sha256'], 'Test hash differs')
+    return {'manifest_path': spec['manifest_path'], 'manifest_sha256': spec['manifest_sha256'],
+            'test': artifact}
+
+
+def freeze_node(root, node):
+    require(node in ('a', 'b', 'c'), 'Unsupported node')
+    assert_fl_idle(root)
+    upper = node.upper()
+    config_path = root/'config/fl/fedavg.json'
+    config = read(config_path)
+    spec, contract = config['clients'][upper], config['model']
+    frozen_test = freeze_test(root, node, config)
     require(config['global_model_output'] == 'models/fl/current', 'Unexpected global model path')
     global_dir = inside(root, config['global_model_output'], 'models/fl')
     local_dir = inside(root, spec['baseline_model_dir'], 'models/node-'+node)
@@ -112,8 +126,7 @@ def freeze_node(root, node):
     return {'frozen_at_utc':datetime.now(timezone.utc).isoformat(), 'run_id':str(receipt['run-id']),
             'selected_round':global_meta['selected_round'], 'config_sha256':config_sha,
             'global':model_spec(global_dir,global_meta),
-            'nodes':{upper:{'manifest_path':spec['manifest_path'], 'manifest_sha256':spec['manifest_sha256'],
-                            'test':artifact,'local':model_spec(local_dir,local_meta)}},
+            'nodes':{upper:{**frozen_test, 'local':model_spec(local_dir,local_meta)}},
             'fitting':False,'threshold_tuning':False,
             'scope':'One existing held-out pilot partition; same rows for local/global; not independent recording'}
 
@@ -161,11 +174,10 @@ def verify_row_identity(root, plan, node, destination):
                     'Prediction/source identities or labels differ')
 
 
-def evaluate(root, node, job_folder, execute, progress=lambda message:None):
-    root = Path(root).resolve()
-    require(node in ('a','b','c'), 'Unsupported node')
-    job_folder = Path(job_folder).resolve()
-    require(job_folder.is_relative_to((root/'reports/dashboard/sessions').resolve()), 'Unexpected report destination')
+@contextmanager
+def evaluation_lock(root, job_folder, node):
+    require(job_folder.is_relative_to((root/'reports/dashboard/sessions').resolve()),
+            'Unexpected report destination')
     lock = root/'runtime/dashboard/.dataset-evaluation-lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -173,21 +185,48 @@ def evaluate(root, node, job_folder, execute, progress=lambda message:None):
     except FileExistsError:
         raise ValueError('Một job dataset đang giữ lock; kiểm tra job trước khi chạy lại')
     try:
+        write_new(lock/'owner.json', {'job': job_folder.name, 'node': node})
+        yield
+    finally:
+        # Windows can briefly hold a handle after the lock metadata is closed.
+        for attempt in range(5):
+            try:
+                (lock/'owner.json').unlink(missing_ok=True)
+                lock.rmdir()
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                if os.name == 'nt' and lock.exists() and not lock.is_symlink():
+                    # Windows may leave the now-empty lock directory marked read-only.
+                    lock.chmod(stat.S_IWRITE)
+                time.sleep(.1)
+
+
+def execute_worker(execute, command, name):
+    try:
+        execute(command)
+    except subprocess.TimeoutExpired:
+        # Only this job's fixed-name ephemeral worker, never lab services.
+        try:
+            execute(['docker', 'rm', '-f', name])
+        except Exception:
+            pass
+        raise
+
+
+def evaluate(root, node, job_folder, execute, progress=lambda message:None):
+    root = Path(root).resolve()
+    job_folder = Path(job_folder).resolve()
+    with evaluation_lock(root, job_folder, node):
         progress('Đang kiểm và đóng băng hash test/model…')
         plan = freeze_node(root,node)
         destination = job_folder/'dataset'
         destination.mkdir()
         write_new(destination/'plan.json',plan)
-        write_new(lock/'owner.json',{'job':job_folder.name,'node':node})
         name='ddos-fl-laptop-dataset-'+uuid.uuid4().hex[:12]
         progress('Đang chấm toàn bộ test bằng Local và Global trong container network none…')
-        try:
-            execute(worker_command(root,node,destination,plan,name))
-        except subprocess.TimeoutExpired:
-            # Only this job's fixed-name ephemeral worker, never lab services.
-            try: execute(['docker','rm','-f',name])
-            except Exception: pass
-            raise
+        execute_worker(execute, worker_command(root,node,destination,plan,name), name)
         progress('Đang đếm lại confusion matrix và đối chiếu từng nhãn/row_uid…')
         verify_sources(root,plan)
         reports = verify_output(destination,plan)  # existing independent metric recount
@@ -216,10 +255,102 @@ def evaluate(root, node, job_folder, execute, progress=lambda message:None):
         write_new(destination/'summary.json',summary)
         progress('Hoàn tất đánh giá dataset; model và dữ liệu giữ nguyên')
         return summary
-    finally:
-        owner=lock/'owner.json'
-        if owner.exists(): owner.unlink()
-        lock.rmdir()
+
+
+def cross_predictions(path, test_path, models):
+    detected = dict.fromkeys(models, 0)
+    rows = 0
+    with path.open(encoding='utf-8', newline='') as stream:
+        for original, scored in zip_longest(attack_rows(test_path), csv.DictReader(stream)):
+            require(original is not None and scored is not None, 'Attack prediction count differs')
+            index, row = original
+            require(int(scored['test_row_index']) == index and scored['row_uid'] == row['row_uid']
+                    and scored['true_label'] == '1', 'Attack prediction identity or label differs')
+            for mode, model in models.items():
+                probability = float(scored[mode+'_probability_attack'])
+                label = int(scored[mode+'_predicted_label'])
+                require(0 <= probability <= 1 and label == int(probability >= model['threshold']),
+                        'Prediction differs from frozen threshold')
+                detected[mode] += label
+            rows += 1
+    require(rows > 0, 'Tập test nguồn không có mẫu attack')
+    return rows, {mode: {**model, 'tp': detected[mode], 'fn': rows-detected[mode],
+                        'recall_attack': detected[mode]/rows}
+                  for mode, model in models.items()}
+
+
+def evaluate_cross(root, target, source, job_folder, execute, progress=lambda message: None):
+    root, job_folder = Path(root).resolve(), Path(job_folder).resolve()
+    require(target in ('a', 'b', 'c') and source in ('a', 'b', 'c') and target != source,
+            'Node nguồn và đích phải khác nhau')
+    with evaluation_lock(root, job_folder, target):
+        assert_fl_idle(root)
+        progress('Đang kiểm tập test nguồn và hai model đích…')
+        config_path = root/'config/fl/fedavg.json'
+        config_digest = sha(config_path)
+        config = read(config_path)
+        source_spec = freeze_test(root, source, config)
+        artifact = source_spec['test']
+        require(artifact['label_counts'].get('attack', 0) > 0, 'Tập test nguồn không có mẫu attack')
+        target_spec = config['clients'][target.upper()]
+        require(config['global_model_output'] == 'models/fl/current', 'Unexpected global model path')
+        folders = {'local': inside(root, target_spec['baseline_model_dir'], 'models/node-'+target),
+                   'global': inside(root, 'models/fl/current', 'models/fl')}
+        test_path = root/artifact['path']
+        frozen = {config_path: config_digest,
+                  root/source_spec['manifest_path']: source_spec['manifest_sha256'],
+                  test_path: artifact['sha256']}
+        mounts = [(root/'scripts', '/app'), (test_path, '/input/test.csv')]
+        models = {}
+        contract = config['model']
+        for mode, folder in folders.items():
+            meta_path = inside(root, (folder/'model.json').relative_to(root), folder.relative_to(root))
+            weights = inside(root, (folder/'weights.npz').relative_to(root), folder.relative_to(root))
+            frozen[meta_path], frozen[weights] = sha(meta_path), sha(weights)
+            meta = read(meta_path)
+            for field in ('schema_version', 'features', 'transform', 'input_width', 'hidden_layer_sizes',
+                          'activation', 'output_activation', 'threshold'):
+                require(meta[field] == contract[field], 'Model contract differs: '+field)
+            require(meta['weights_sha256'] == frozen[weights], 'Model weights hash differs')
+            if mode == 'local':
+                require(frozen[weights] == target_spec['baseline_weights_sha256'],
+                        'Pinned target local baseline differs')
+            check_weights(weights, contract)
+            models[mode] = {'id': meta.get('config', {}).get('experiment_id'),
+                            'weights_sha256': frozen[weights], 'threshold': meta['threshold']}
+            mounts.extend([(meta_path, '/model/'+mode+'/model.json'),
+                           (weights, '/model/'+mode+'/weights.npz')])
+
+        destination = job_folder/'dataset'
+        destination.mkdir()
+        name = 'ddos-fl-laptop-dataset-'+uuid.uuid4().hex[:12]
+        command = ['docker', 'run', '--rm', '--pull', 'never', '--name', name, '--network', 'none',
+                   '--memory', '768m', '--cpus', '0.75', '--read-only', '--tmpfs', '/tmp',
+                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges']
+        for source_file, container_file in mounts:
+            command += ['--mount', f'type=bind,source={source_file},target={container_file},readonly']
+        command += ['--mount', f'type=bind,source={destination},target=/output', IMAGE,
+                    'python3', '-B', '/app/score_attack_test.py',
+                    '--local-hash', models['local']['weights_sha256'],
+                    '--global-hash', models['global']['weights_sha256']]
+        progress(f'Đang chấm {source.upper()} → {target.upper()} bằng Local và Global…')
+        execute_worker(execute, command, name)
+        progress('Đang đối chiếu mẫu attack và đếm lại số phát hiện, bỏ sót…')
+        predictions = destination/'predictions.csv'
+        rows, results = cross_predictions(predictions, test_path, models)
+        require(rows == artifact['label_counts']['attack'], 'Attack count differs from test manifest')
+        assert_fl_idle(root)
+        require(all(sha(path) == digest for path, digest in frozen.items()),
+                'Dữ liệu hoặc model thay đổi trong lúc chấm')
+        summary = {'kind': 'cross_attack_test', 'node': target.upper(), 'source_node': source.upper(),
+                   'partition': 'test', 'true_label': 'attack', 'rows': rows, 'models': results,
+                   'evaluated_at_utc': datetime.now(timezone.utc).isoformat(),
+                   'test_csv_sha256': artifact['sha256'],
+                   'manifest_sha256': source_spec['manifest_sha256'],
+                   'config_sha256': config_digest,
+                   'artifacts': {'predictions.csv': sha(predictions)}}
+        write_new(destination/'summary.json', summary)
+        return summary
 
 
 def predictions_page(path, model='local', selection='all', page=1, size=50):

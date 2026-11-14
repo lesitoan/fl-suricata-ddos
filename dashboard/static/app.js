@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 const activeStatuses = new Set(['queued', 'running', 'waiting']);
+const datasetActions = new Set(['dataset.test', 'dataset.cross_attack']);
 const descriptions = {a: ['HTTP / TCP', 'SYN probe', '50 SYN · 10 gói/s'], b: ['UDP echo', 'UDP load', '1.000 UDP · 500 gói/s · 2 giây'], c: ['LDAP / UDP', 'LDAP burst', '100 LDAP · 20 gói/s']};
 const choices = {};
 let token = '', latest = null, logKind = 'eve', reportKind = 'live', logPaused = false, toastTimer;
@@ -29,7 +30,7 @@ async function api(path, options) {
 async function action(payload) {
   try {
     const result = await api('/api/action', {method:'POST', headers:{'Content-Type':'application/json', 'X-Dashboard-Token':token}, body:JSON.stringify(payload)});
-    if(payload.action==='dataset.test') {
+    if(datasetActions.has(payload.action)) {
       datasetSelection=result.job; datasetPage=1; datasetLoadedKey=''; reportKind='test';
       document.querySelectorAll('#report-tabs button').forEach(item=>item.classList.toggle('active',item.dataset.report==='test'));
     }
@@ -55,6 +56,11 @@ function nodeCard(node, state) {
   const blockedGlobal = latest.fl.busy && mode === 'global';
   const disabled = (!latest.docker.ok || busy) ? 'disabled' : '';
   const canLoad = service.running && sensor.running && selected.exists && !blockedGlobal;
+  const canTest = !disabled && state.local_model.exists && state.global_model.exists && !latest.fl.busy && !latest.dataset_busy;
+  const crossButtons = Object.keys(descriptions).filter(source=>source!==node).map(source=>`
+    <button class="button secondary" data-do="cross" data-source="${source}"
+      title="Chấm mẫu attack có nhãn của node ${source.toUpperCase()} bằng Local và Global"
+      ${canTest && latest.nodes[source].dataset_available ? '' : 'disabled'}>Attack từ ${source.toUpperCase()}</button>`).join('');
   return `<article class="node-card" data-node="${node}">
     <div class="node-title"><div class="node-name"><span class="node-avatar">${node.toUpperCase()}</span><div><h2>Node ${node.toUpperCase()}</h2><small>${descriptions[node][0]}</small></div></div><span class="pill ${badge}">${busy ? 'Đang thao tác' : title}</span></div>
     <div class="mode-row"><span>Chọn mô hình</span><div class="segmented"><button data-mode="local" class="${mode==='local'?'active':''}" ${busy?'disabled':''}>Local</button><button data-mode="global" class="${mode==='global'?'active':''}" ${busy?'disabled':''}>Global</button></div></div>
@@ -63,6 +69,7 @@ function nodeCard(node, state) {
     <div class="node-power"><button class="button secondary" data-do="start" ${disabled || (!selected.exists || blockedGlobal ? 'disabled':'')}>⏻ Bật node</button><button class="button subtle" data-do="stop" ${disabled || (!anyRunning?'disabled':'')}>Tắt</button><button class="button secondary" data-do="mode" ${disabled || (!canLoad?'disabled':'')}>↻ Nạp ${mode}</button></div>
     <div class="traffic-actions"><button class="button benign" data-do="benign" ${disabled || (!ready || (latest.fl.busy && state.mode==='global')?'disabled':'')}>↗ Benign</button><button class="button attack" data-do="attack" ${disabled || (!ready || (latest.fl.busy && state.mode==='global')?'disabled':'')}>ϟ ${descriptions[node][1]}</button></div>
     <button class="button dataset-test-button" data-do="dataset" title="Chấm cùng tập test bằng cả Local và Global; không cần bật dịch vụ live" ${disabled || (!state.dataset_available || !state.local_model.exists || !state.global_model.exists || latest.fl.busy || latest.dataset_busy?'disabled':'')}>▤ Test dataset · Local vs Global</button>
+    <div class="traffic-actions cross-test-actions" aria-label="Test chéo trên dataset">${crossButtons}</div>
     <div class="node-footer">${descriptions[node][2]} · chỉ trong mạng lab Docker</div>
   </article>`;
 }
@@ -100,12 +107,13 @@ function renderFL() {
   $('fl-chart').innerHTML = flChart(report.history || []);
 }
 
-const actionNames = {'node.start':'Bật node', 'node.stop':'Dừng node', 'node.mode':'Nạp model', 'traffic':'Gửi traffic', 'dataset.test':'Test dataset · Local/Global', 'fl.start':'Bật hệ thống FL', 'fl.stop':'Dừng hệ thống FL', 'fl.run':'Huấn luyện FL', 'logs.clear':'Xóa log live'};
+const actionNames = {'tensorboard.start':'Mở TensorBoard','node.start':'Bật node', 'node.stop':'Dừng node', 'node.mode':'Nạp model', 'traffic':'Gửi traffic', 'dataset.test':'Test dataset · Local/Global', 'dataset.cross_attack':'Test chéo attack', 'fl.start':'Bật hệ thống FL', 'fl.stop':'Dừng hệ thống FL', 'fl.run':'Huấn luyện FL', 'logs.clear':'Xóa log live'};
+const jobNode = job => job.source_node ? job.source_node.toUpperCase()+' → '+job.node.toUpperCase() : job.node?.toUpperCase() || '';
 const statusNames = {queued:'Đang xếp hàng',running:'Đang chạy',waiting:'Đang chờ',complete:'Hoàn tất',failed:'Thất bại',interrupted:'Bị gián đoạn'};
 function renderActivity() {
   const jobs = latest.jobs.slice().reverse();
   $('activity-count').textContent = jobs.length;
-  $('activity-list').innerHTML = jobs.length ? jobs.map(job=>`<article class="activity" data-job="${escapeHTML(job.id)}"><div class="activity-title"><span>${actionNames[job.action] || job.action}${job.node?' · '+job.node.toUpperCase():''}</span><time>${clock(job.created_at)}</time></div><p>${escapeHTML(job.scenario ? `${job.scenario.toUpperCase()} / ${job.mode?.toUpperCase()} · ` : '')}${escapeHTML(job.error || job.message || '')}</p><span class="pill ${job.status==='complete'?'good':job.status==='failed'?'bad':activeStatuses.has(job.status)?'warn':'muted'}">${statusNames[job.status] || job.status}</span></article>`).join('') : '<div class="empty-state"><span>↗</span>Thao tác của phiên demo sẽ hiện tại đây.<br>Dashboard không tự gửi traffic.</div>';
+  $('activity-list').innerHTML = jobs.length ? jobs.map(job=>`<article class="activity" data-job="${escapeHTML(job.id)}"><div class="activity-title"><span>${actionNames[job.action] || job.action}${job.node?' · '+jobNode(job):''}</span><time>${clock(job.created_at)}</time></div><p>${escapeHTML(job.scenario ? `${job.scenario.toUpperCase()} / ${job.mode?.toUpperCase()} · ` : '')}${escapeHTML(job.error || job.message || '')}</p><span class="pill ${job.status==='complete'?'good':job.status==='failed'?'bad':activeStatuses.has(job.status)?'warn':'muted'}">${statusNames[job.status] || job.status}</span></article>`).join('') : '<div class="empty-state"><span>↗</span>Thao tác của phiên demo sẽ hiện tại đây.<br>Dashboard không tự gửi traffic.</div>';
 }
 
 function bars(nodes, metric, label) {
@@ -135,20 +143,25 @@ function renderUDPMetrics() {
 function renderDatasetControls() {
   const visible=reportKind==='test';
   $('dataset-controls').classList.toggle('hidden',!visible);
-  const jobs=latest.jobs.filter(job=>job.action==='dataset.test').slice().reverse();
+  const jobs=latest.jobs.filter(job=>datasetActions.has(job.action)).slice().reverse();
   const select=$('dataset-run');
   const optionKey=jobs.map(job=>job.id+':'+job.status).join('|');
   if(select.dataset.optionsKey!==optionKey) {
-    select.innerHTML='<option value="archive">Báo cáo A/B/C đã lưu trước đây</option>'+jobs.map(job=>`<option value="${escapeHTML(job.id)}">Node ${job.node.toUpperCase()} · ${clock(job.created_at)} · ${statusNames[job.status] || job.status}</option>`).join('');
+    select.innerHTML='<option value="archive">Báo cáo A/B/C đã lưu trước đây</option>'+jobs.map(job=>`<option value="${escapeHTML(job.id)}">${job.source_node?'Attack '+jobNode(job):'Node '+jobNode(job)} · ${clock(job.created_at)} · ${statusNames[job.status] || job.status}</option>`).join('');
     select.dataset.optionsKey=optionKey;
   }
   select.value=datasetSelection;
   const job=jobs.find(item=>item.id===datasetSelection), summary=job?.dataset_summary;
   const complete=visible && job?.status==='complete' && summary;
   $('dataset-csv').disabled=$('dataset-json').disabled=!complete;
-  $('dataset-confusion').classList.toggle('hidden',!complete);
+  const cross = job?.action==='dataset.cross_attack';
+  $('dataset-confusion').classList.toggle('hidden',!complete || cross);
   $('dataset-samples').classList.toggle('hidden',!complete);
   if(!complete) return;
+  const filter = $('dataset-filter');
+  for(const option of filter.options) option.disabled = cross && ['benign','fp'].includes(option.value);
+  if(filter.selectedOptions[0]?.disabled) filter.value='all';
+  if(cross) { refreshDatasetRows(); return; }
   const metrics=summary.nodes[summary.node].models;
   $('dataset-confusion').innerHTML=['local','global'].map(model=>{
     const matrix=metrics[model].confusion_matrix;
@@ -181,12 +194,16 @@ function renderReports() {
   renderDatasetControls();
   $('comparison-chart').classList.remove('dataset-single');
   if (reportKind === 'test') {
-    const selected=latest.jobs.find(job=>job.id===datasetSelection && job.action==='dataset.test');
+    const selected=latest.jobs.find(job=>job.id===datasetSelection && datasetActions.has(job.action));
     const summary=selected?.dataset_summary;
     if(datasetSelection!=='archive' && (!summary || selected?.status!=='complete')) {
-      $('report-note').textContent=selected ? `${selected.node.toUpperCase()} · ${selected.error || selected.message || 'Đang chuẩn bị…'} · Chưa có kết quả mới được xác minh.` : 'Chọn một lượt test hoặc bấm Test dataset ở node.';
+      $('report-note').textContent=selected ? `${jobNode(selected)} · ${selected.error || selected.message || 'Đang chuẩn bị…'}` : 'Chọn một lượt test ở thẻ node.';
       $('comparison-chart').innerHTML=''; $('result-head').innerHTML='';
-      $('result-body').innerHTML='<tr><td class="report-empty">Kết quả chỉ hiển thị sau khi đối chiếu hash, nhãn và confusion matrix.</td></tr>';
+      $('result-body').innerHTML='<tr><td class="report-empty">Kết quả sẽ hiện sau khi xác minh các mẫu và dự đoán.</td></tr>';
+      return;
+    }
+    if(summary?.kind==='cross_attack_test') {
+      renderCrossAttack(summary);
       return;
     }
     const test=summary ? {available:true,nodes:summary.nodes,global_hash:summary.global_weights_sha256,
@@ -219,6 +236,19 @@ function renderReports() {
     const report=job.report, stale=job.mode==='global' && job.weights_sha256!==latest.fl.global_model.hash;
     return `<tr><td><b>${job.node.toUpperCase()} · ${job.scenario==='benign'?'Benign':job.node==='b' && report.traffic_profile!=='bounded_udp_load'?'UDP burst (cũ)':descriptions[job.node][1]}</b><small>${clock(job.created_at)}</small></td><td><span class="model-label ${job.mode}">${job.mode.toUpperCase()}</span><small title="${escapeHTML(job.weights_sha256)}">${hash(job.weights_sha256)}${stale?' · model cũ':''}</small></td><td>${report.matched_flows} / ${report.matched_predictions}</td><td>${report.predicted_benign}</td><td>${report.predicted_attack}</td><td>${report.mean_delay_seconds===null?'—':report.mean_delay_seconds.toFixed(2)+'s'}</td><td><span class="pill ${job.status==='complete'?'good':'warn'}">${job.status==='complete'?'Đã ghép':'Chưa đầy đủ'}</span></td></tr>`;
   }).join('') || '<tr><td colspan="7" class="report-empty">Gửi benign hoặc probe để bắt đầu so sánh.<br>Kết quả sẽ xuất hiện sau khi Suricata xuất flow.</td></tr>';
+}
+
+function renderCrossAttack(summary) {
+  const {source_node:source,node:target,rows,models}=summary;
+  $('report-note').textContent=`${source} → ${target} · ${number(rows)} flow attack có nhãn từ tập test của ${source} · CSV ${hash(summary.test_csv_sha256)}. Chấm offline bằng Local ${target} và Global trên cùng các flow. Tập chỉ gồm attack nên báo cáo recall và số mẫu bỏ sót.`;
+  $('comparison-chart').classList.add('dataset-single');
+  $('comparison-chart').innerHTML=bars([source+' → '+target],(_,mode)=>models[mode].recall_attack,'RECALL ATTACK');
+  $('result-head').innerHTML='<tr><th>DỮ LIỆU → NODE</th><th>MODEL</th><th>MẪU ATTACK</th><th>PHÁT HIỆN (TP)</th><th>BỎ SÓT (FN)</th><th>RECALL ATTACK</th></tr>';
+  $('result-body').innerHTML=Object.entries(models).map(([mode,model])=>{
+    const current = mode==='global' ? latest.fl.global_model : latest.nodes[target.toLowerCase()].local_model;
+    const stale = model.weights_sha256!==current.hash;
+    return `<tr><td><b>${source} → ${target}</b></td><td><span class="model-label ${mode}">${mode.toUpperCase()}</span><small title="${escapeHTML(model.id)}">${hash(model.weights_sha256)}${stale?' · model cũ':''}</small></td><td>${number(rows)}</td><td>${number(model.tp)}</td><td>${number(model.fn)}</td><td><b>${pct(model.recall_attack)}</b></td></tr>`;
+  }).join('');
 }
 
 function render() {
@@ -290,7 +320,29 @@ $('nodes').addEventListener('click',event=>{
   else if(operation==='stop') action({action:'node.stop',node});
   else if(operation==='benign' || operation==='attack') action({action:'traffic',node,scenario:operation});
   else if(operation==='dataset') action({action:'dataset.test',node});
+  else if(operation==='cross') action({action:'dataset.cross_attack',node,source_node:button.dataset.source});
 });
+$('tensorboard-open').onclick=async()=>{
+  const button=$('tensorboard-open');
+  const viewer=window.open('about:blank','lab-tensorboard');
+  if(viewer) { viewer.opener=null; viewer.document.title='TensorBoard'; viewer.document.body.textContent='Đang mở TensorBoard, không chạy train…'; }
+  button.disabled=true;
+  try {
+    const created=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':token},body:JSON.stringify({action:'tensorboard.start'})});
+    let result;
+    for(let attempt=0;attempt<160;attempt++) {
+      const state=await api('/api/state');
+      result=state.jobs.find(job=>job.id===created.job);
+      if(result && ['complete','failed'].includes(result.status)) break;
+      await new Promise(resolve=>setTimeout(resolve,500));
+    }
+    if(!result || result.status!=='complete') throw new Error(result?.error || 'TensorBoard chưa sẵn sàng; kiểm tra mục Hoạt động.');
+    if(viewer) viewer.location.href='http://127.0.0.1:6006/#scalars';
+    else toast('TensorBoard đã sẵn sàng tại http://127.0.0.1:6006');
+    await refresh();
+  } catch(error) { if(viewer) viewer.close(); toast(error.message,true); }
+  finally { button.disabled=false; }
+};
 $('fl-start').onclick=()=>action({action:'fl.start'});
 $('fl-stop').onclick=()=>action({action:'fl.stop'});
 $('fl-run').onclick=()=>{
